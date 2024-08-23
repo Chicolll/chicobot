@@ -12,7 +12,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors({
-  origin: ['https://chicoliu.com', 'https://chicoliu.webflow.io']
+  origin: ['https://www.chicoliu.com', 'https://www.chicoliu.webflow.io']
 }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
