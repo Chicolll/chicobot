@@ -31,6 +31,7 @@ app.post('/api/chat', async (req, res) => {
   try {
     console.log("Received chat request:", req.body);
     const { message, threadId } = req.body;
+
     let thread;
     if (threadId) {
       thread = await openai.beta.threads.retrieve(threadId);
@@ -39,24 +40,18 @@ app.post('/api/chat', async (req, res) => {
       thread = await openai.beta.threads.create();
       console.log("Created new thread:", thread.id);
     }
+
     await openai.beta.threads.messages.create(thread.id, {
       role: "user",
       content: message
     });
     console.log("Added user message to thread");
-    
-    // Set headers for SSE
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive'
     });
-
-    // Helper function to send SSE
-    const sendSSE = (data) => {
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-      res.flush(); // Force flush the response
-    };
 
     const stream = await openai.beta.threads.runs.createAndStream(thread.id, {
       assistant_id: assistantId
@@ -64,30 +59,30 @@ app.post('/api/chat', async (req, res) => {
 
     stream
       .on('textCreated', (text) => {
-        sendSSE({ type: 'start' });
+        res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`);
       })
       .on('textDelta', (textDelta, snapshot) => {
-        sendSSE({ type: 'delta', content: textDelta.value });
+        res.write(`data: ${JSON.stringify({ type: 'delta', content: textDelta.value })}\n\n`);
       })
       .on('toolCallCreated', (toolCall) => {
-        sendSSE({ type: 'toolCall', content: toolCall.type });
+        res.write(`data: ${JSON.stringify({ type: 'toolCall', content: toolCall.type })}\n\n`);
       })
       .on('toolCallDelta', (toolCallDelta, snapshot) => {
         if (toolCallDelta.type === 'code_interpreter') {
           if (toolCallDelta.code_interpreter.input) {
-            sendSSE({ type: 'toolCallDelta', content: toolCallDelta.code_interpreter.input });
+            res.write(`data: ${JSON.stringify({ type: 'toolCallDelta', content: toolCallDelta.code_interpreter.input })}\n\n`);
           }
           if (toolCallDelta.code_interpreter.outputs) {
             toolCallDelta.code_interpreter.outputs.forEach(output => {
               if (output.type === "logs") {
-                sendSSE({ type: 'toolCallOutput', content: output.logs });
+                res.write(`data: ${JSON.stringify({ type: 'toolCallOutput', content: output.logs })}\n\n`);
               }
             });
           }
         }
       })
       .on('end', () => {
-        sendSSE({ type: 'end', threadId: thread.id });
+        res.write(`data: ${JSON.stringify({ type: 'end', threadId: thread.id })}\n\n`);
         res.end();
         console.log("Stream ended");
       });
