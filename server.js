@@ -31,6 +31,7 @@ app.post('/api/chat', async (req, res) => {
   try {
     console.log("Received chat request:", req.body);
     const { message, threadId } = req.body;
+
     let thread;
     if (threadId) {
       thread = await openai.beta.threads.retrieve(threadId);
@@ -39,6 +40,7 @@ app.post('/api/chat', async (req, res) => {
       thread = await openai.beta.threads.create();
       console.log("Created new thread:", thread.id);
     }
+
     await openai.beta.threads.messages.create(thread.id, {
       role: "user",
       content: message
@@ -61,24 +63,19 @@ app.post('/api/chat', async (req, res) => {
       })
       .on('textDelta', (textDelta, snapshot) => {
         res.write(`data: ${JSON.stringify({ type: 'delta', content: textDelta.value })}\n\n`);
-        // Add this line to ensure the data is sent immediately
-        res.flushHeaders();
       })
       .on('toolCallCreated', (toolCall) => {
         res.write(`data: ${JSON.stringify({ type: 'toolCall', content: toolCall.type })}\n\n`);
-        res.flushHeaders();
       })
       .on('toolCallDelta', (toolCallDelta, snapshot) => {
         if (toolCallDelta.type === 'code_interpreter') {
           if (toolCallDelta.code_interpreter.input) {
             res.write(`data: ${JSON.stringify({ type: 'toolCallDelta', content: toolCallDelta.code_interpreter.input })}\n\n`);
-            res.flushHeaders();
           }
           if (toolCallDelta.code_interpreter.outputs) {
             toolCallDelta.code_interpreter.outputs.forEach(output => {
               if (output.type === "logs") {
                 res.write(`data: ${JSON.stringify({ type: 'toolCallOutput', content: output.logs })}\n\n`);
-                res.flushHeaders();
               }
             });
           }
