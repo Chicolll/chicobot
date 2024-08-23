@@ -11,7 +11,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: ['https://chicoliu.com', 'https://chicoliu.webflow.io']
+}));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
