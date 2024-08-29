@@ -4,6 +4,8 @@ import cors from 'cors';
 import path from 'path';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
+import fs from 'fs/promises';
+import nodemailer from 'nodemailer';
 
 dotenv.config();
 
@@ -11,6 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
 app.use(cors({
   origin: ['https://www.chicoliu.com', 'https://www.chicoliu.webflow.io']
 }));
@@ -23,6 +26,43 @@ const openai = new OpenAI({
 
 const assistantId = 'asst_cplmQJp8j0qKyABmqM1EWfLt';
 
+// Function to log conversations
+async function logConversation(threadId, message, response) {
+  const logEntry = `
+    Thread ID: ${threadId}
+    User: ${message}
+    Assistant: ${response}
+    Timestamp: ${new Date().toISOString()}
+    `;
+  
+  await fs.appendFile('conversation_log.txt', logEntry);
+}
+
+// Function to send email
+async function sendEmail(threadId, conversation) {
+  let transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS
+    }
+  });
+
+  let mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: process.env.EMAIL_USER, // Send to yourself
+    subject: `Conversation Summary - Thread ${threadId}`,
+    text: conversation
+  };
+
+  try {
+    let info = await transporter.sendMail(mailOptions);
+    console.log('Email sent: ' + info.response);
+  } catch (error) {
+    console.error('Error sending email:', error);
+  }
+}
+
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -31,8 +71,9 @@ app.post('/api/chat', async (req, res) => {
   try {
     console.log("Received chat request:", req.body);
     const { message, threadId } = req.body;
-
     let thread;
+    let conversation = '';
+
     if (threadId) {
       thread = await openai.beta.threads.retrieve(threadId);
       console.log("Retrieved existing thread:", thread.id);
@@ -47,21 +88,26 @@ app.post('/api/chat', async (req, res) => {
     });
     console.log("Added user message to thread");
 
+    conversation += `User: ${message}\n`;
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive'
     });
 
-    const stream = await openai.beta.threads.runs.createAndStream(thread.id, {
+    let assistantResponse = '';
+
+    const run = openai.beta.threads.runs.stream(thread.id, {
       assistant_id: assistantId
     });
 
-    stream
+    run
       .on('textCreated', (text) => {
         res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`);
       })
       .on('textDelta', (textDelta, snapshot) => {
+        assistantResponse += textDelta.value;
         res.write(`data: ${JSON.stringify({ type: 'delta', content: textDelta.value })}\n\n`);
       })
       .on('toolCallCreated', (toolCall) => {
@@ -81,13 +127,21 @@ app.post('/api/chat', async (req, res) => {
           }
         }
       })
-      .on('end', () => {
+      .on('end', async () => {
         res.write(`data: ${JSON.stringify({ type: 'end', threadId: thread.id })}\n\n`);
         res.end();
         console.log("Stream ended");
+
+        conversation += `Assistant: ${assistantResponse}\n`;
+
+        // Log the conversation
+        await logConversation(thread.id, message, assistantResponse);
+
+        // Send email with conversation summary
+        await sendEmail(thread.id, conversation);
       });
 
-    await stream.finalPromise;
+    await run.finalPromise;
   } catch (error) {
     console.error('Error:', error);
     res.status(500).json({ error: 'An error occurred while processing your request.' });
