@@ -20,20 +20,30 @@ app.use(cors({
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+let openai;
+try {
+  openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY
+  });
+} catch (error) {
+  console.error('Error initializing OpenAI:', error);
+}
 
 const assistantId = 'asst_cplmQJp8j0qKyABmqM1EWfLt';
 
 // Email configuration
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
-});
+let transporter;
+try {
+  transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS
+    }
+  });
+} catch (error) {
+  console.error('Error creating nodemailer transporter:', error);
+}
 
 // In-memory conversation storage (Note: this will reset on each deployment)
 const conversations = new Map();
@@ -53,9 +63,13 @@ function logConversation(threadId, message, role, ip) {
 
 // Function to get location from IP
 function getLocationFromIP(ip) {
-  const geo = geoip.lookup(ip);
-  if (geo) {
-    return `${geo.city}, ${geo.region}, ${geo.country}`;
+  try {
+    const geo = geoip.lookup(ip);
+    if (geo) {
+      return `${geo.city}, ${geo.region}, ${geo.country}`;
+    }
+  } catch (error) {
+    console.error('Error looking up IP:', error);
   }
   return 'Unknown Location';
 }
@@ -175,7 +189,7 @@ app.post('/api/chat', async (req, res) => {
 
     await stream.finalPromise;
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error in /api/chat:', error);
     res.status(500).json({ error: 'An error occurred while processing your request.' });
   }
 });
@@ -194,7 +208,7 @@ app.post('/api/reset', async (req, res) => {
     console.log("Created new thread:", newThread.id);
     res.json({ message: 'Chat reset successfully', threadId: newThread.id });
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error in /api/reset:', error);
     res.status(500).json({ error: 'An error occurred while resetting the chat.' });
   }
 });
@@ -210,9 +224,15 @@ app.post('/api/end-conversation', async (req, res) => {
       res.status(400).json({ error: 'ThreadId is required' });
     }
   } catch (error) {
-    console.error('Error ending conversation:', error);
+    console.error('Error in /api/end-conversation:', error);
     res.status(500).json({ error: 'An error occurred while ending the conversation.' });
   }
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'An unexpected error occurred' });
 });
 
 // Vercel requires a default export
