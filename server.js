@@ -5,6 +5,8 @@ import path from 'path';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
+import geoip from 'geoip-lite';
+import moment from 'moment-timezone';
 
 dotenv.config();
 
@@ -37,27 +39,53 @@ const transporter = nodemailer.createTransport({
 const conversations = new Map();
 
 // Function to log conversations (in-memory only for Vercel)
-function logConversation(threadId, message, role) {
+function logConversation(threadId, message, role, ip) {
   if (!conversations.has(threadId)) {
-    conversations.set(threadId, []);
+    conversations.set(threadId, {
+      messages: [],
+      startTime: Date.now(),
+      ip: ip
+    });
   }
-  conversations.get(threadId).push({ role, content: message });
+  conversations.get(threadId).messages.push({ role, content: message });
   console.log(`Logged message for thread ${threadId}: ${role}: ${message}`);
+}
+
+// Function to get location from IP
+function getLocationFromIP(ip) {
+  const geo = geoip.lookup(ip);
+  if (geo) {
+    return `${geo.city}, ${geo.region}, ${geo.country}`;
+  }
+  return 'Unknown Location';
 }
 
 // Function to send email
 async function sendEmailNotification(threadId) {
   const conversation = conversations.get(threadId);
-  if (!conversation || conversation.length === 0) {
+  if (!conversation || conversation.messages.length === 0) {
     console.log(`No conversation to send for thread ${threadId}`);
     return;
   }
 
-  const emailContent = conversation.map(msg => `${msg.role}: ${msg.content}`).join('\n\n');
+  const location = getLocationFromIP(conversation.ip);
+  const startTime = moment(conversation.startTime).tz('America/Los_Angeles');
+  const endTime = moment().tz('America/Los_Angeles');
+  const duration = moment.duration(endTime.diff(startTime));
+
+  const emailContent = `
+Location: ${location}
+Start Time: ${startTime.format('YYYY-MM-DD HH:mm:ss')} (California Time)
+Duration: ${Math.floor(duration.asMinutes())} minutes ${Math.floor(duration.asSeconds()) % 60} seconds
+
+Conversation:
+${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
+  `;
+
   const mailOptions = {
     from: process.env.EMAIL_USER,
     to: process.env.NOTIFICATION_EMAIL,
-    subject: `Conversation Thread: ${threadId}`,
+    subject: `Conversation from ${location}`,
     text: emailContent
   };
 
@@ -79,6 +107,7 @@ app.post('/api/chat', async (req, res) => {
   try {
     console.log("Received chat request:", req.body);
     const { message, threadId } = req.body;
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
 
     let thread;
     if (threadId) {
@@ -90,7 +119,7 @@ app.post('/api/chat', async (req, res) => {
     }
 
     // Log user message
-    logConversation(thread.id, message, 'user');
+    logConversation(thread.id, message, 'user', ip);
 
     await openai.beta.threads.messages.create(thread.id, {
       role: "user",
@@ -141,7 +170,7 @@ app.post('/api/chat', async (req, res) => {
         console.log("Stream ended");
 
         // Log assistant response
-        logConversation(thread.id, assistantResponse, 'assistant');
+        logConversation(thread.id, assistantResponse, 'assistant', ip);
       });
 
     await stream.finalPromise;
