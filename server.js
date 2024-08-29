@@ -50,7 +50,7 @@ async function sendEmail(threadId, conversation) {
 
   let mailOptions = {
     from: process.env.EMAIL_USER,
-    to: process.env.EMAIL_USER,
+    to: process.env.EMAIL_USER, // Send to yourself
     subject: `Conversation Summary - Thread ${threadId}`,
     text: conversation
   };
@@ -68,21 +68,15 @@ app.get('/', (req, res) => {
 });
 
 app.post('/api/chat', async (req, res) => {
-  let thread;
   try {
     console.log("Received chat request:", req.body);
     const { message, threadId } = req.body;
+    let thread;
     let conversation = '';
 
     if (threadId) {
-      try {
-        thread = await openai.beta.threads.retrieve(threadId);
-        console.log("Retrieved existing thread:", thread.id);
-      } catch (error) {
-        console.error("Error retrieving thread:", error);
-        thread = await openai.beta.threads.create();
-        console.log("Created new thread:", thread.id);
-      }
+      thread = await openai.beta.threads.retrieve(threadId);
+      console.log("Retrieved existing thread:", thread.id);
     } else {
       thread = await openai.beta.threads.create();
       console.log("Created new thread:", thread.id);
@@ -104,38 +98,53 @@ app.post('/api/chat', async (req, res) => {
 
     let assistantResponse = '';
 
-    const run = await openai.beta.threads.runs.create(thread.id, {
+    const stream = await openai.beta.threads.runs.createAndStream(thread.id, {
       assistant_id: assistantId
     });
 
-    while (true) {
-      const runStatus = await openai.beta.threads.runs.retrieve(thread.id, run.id);
-      if (runStatus.status === 'completed') {
-        const messages = await openai.beta.threads.messages.list(thread.id);
-        assistantResponse = messages.data[0].content[0].text.value;
-        break;
-      } else if (runStatus.status === 'failed') {
-        throw new Error('Run failed');
-      }
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
+    stream
+      .on('textCreated', (text) => {
+        res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`);
+      })
+      .on('textDelta', (textDelta, snapshot) => {
+        assistantResponse += textDelta.value;
+        res.write(`data: ${JSON.stringify({ type: 'delta', content: textDelta.value })}\n\n`);
+      })
+      .on('toolCallCreated', (toolCall) => {
+        res.write(`data: ${JSON.stringify({ type: 'toolCall', content: toolCall.type })}\n\n`);
+      })
+      .on('toolCallDelta', (toolCallDelta, snapshot) => {
+        if (toolCallDelta.type === 'code_interpreter') {
+          if (toolCallDelta.code_interpreter.input) {
+            res.write(`data: ${JSON.stringify({ type: 'toolCallDelta', content: toolCallDelta.code_interpreter.input })}\n\n`);
+          }
+          if (toolCallDelta.code_interpreter.outputs) {
+            toolCallDelta.code_interpreter.outputs.forEach(output => {
+              if (output.type === "logs") {
+                res.write(`data: ${JSON.stringify({ type: 'toolCallOutput', content: output.logs })}\n\n`);
+              }
+            });
+          }
+        }
+      })
+      .on('end', async () => {
+        res.write(`data: ${JSON.stringify({ type: 'end', threadId: thread.id })}\n\n`);
+        res.end();
+        console.log("Stream ended");
 
-    res.write(`data: ${JSON.stringify({ type: 'delta', content: assistantResponse })}\n\n`);
-    res.write(`data: ${JSON.stringify({ type: 'end', threadId: thread.id })}\n\n`);
-    res.end();
-    console.log("Response sent");
+        conversation += `Assistant: ${assistantResponse}\n`;
 
-    conversation += `Assistant: ${assistantResponse}\n`;
+        // Log the conversation
+        await logConversation(thread.id, message, assistantResponse);
 
-    // Log the conversation
-    await logConversation(thread.id, message, assistantResponse);
+        // Send email with conversation summary
+        await sendEmail(thread.id, conversation);
+      });
 
-    // Send email with conversation summary
-    await sendEmail(thread.id, conversation);
-
+    await stream.finalPromise;
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: 'An error occurred while processing your request.', details: error.message });
+    res.status(500).json({ error: 'An error occurred while processing your request.' });
   }
 });
 
