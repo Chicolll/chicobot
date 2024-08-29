@@ -48,7 +48,10 @@ function logConversation(threadId, message, role) {
 // Function to send email
 async function sendEmailNotification(threadId) {
   const conversation = conversations.get(threadId);
-  if (!conversation) return;
+  if (!conversation || conversation.length === 0) {
+    console.log(`No conversation to send for thread ${threadId}`);
+    return;
+  }
 
   const emailContent = conversation.map(msg => `${msg.role}: ${msg.content}`).join('\n\n');
   const mailOptions = {
@@ -61,6 +64,8 @@ async function sendEmailNotification(threadId) {
   try {
     await transporter.sendMail(mailOptions);
     console.log(`Email sent for thread ${threadId}`);
+    // Clear the conversation after sending email
+    conversations.delete(threadId);
   } catch (error) {
     console.error('Error sending email:', error);
   }
@@ -84,14 +89,14 @@ app.post('/api/chat', async (req, res) => {
       console.log("Created new thread:", thread.id);
     }
 
+    // Log user message
+    logConversation(thread.id, message, 'user');
+
     await openai.beta.threads.messages.create(thread.id, {
       role: "user",
       content: message
     });
     console.log("Added user message to thread");
-
-    // Log user message
-    logConversation(thread.id, message, 'user');
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -137,9 +142,6 @@ app.post('/api/chat', async (req, res) => {
 
         // Log assistant response
         logConversation(thread.id, assistantResponse, 'assistant');
-
-        // Send email notification
-        await sendEmailNotification(thread.id);
       });
 
     await stream.finalPromise;
@@ -158,9 +160,6 @@ app.post('/api/reset', async (req, res) => {
       
       // Send final email notification before resetting
       await sendEmailNotification(threadId);
-      
-      // Clear conversation from memory
-      conversations.delete(threadId);
     }
     const newThread = await openai.beta.threads.create();
     console.log("Created new thread:", newThread.id);
@@ -168,6 +167,22 @@ app.post('/api/reset', async (req, res) => {
   } catch (error) {
     console.error('Error:', error);
     res.status(500).json({ error: 'An error occurred while resetting the chat.' });
+  }
+});
+
+// New endpoint to handle conversation end and send email
+app.post('/api/end-conversation', async (req, res) => {
+  try {
+    const { threadId } = req.body;
+    if (threadId) {
+      await sendEmailNotification(threadId);
+      res.json({ message: 'Conversation ended and email sent successfully' });
+    } else {
+      res.status(400).json({ error: 'ThreadId is required' });
+    }
+  } catch (error) {
+    console.error('Error ending conversation:', error);
+    res.status(500).json({ error: 'An error occurred while ending the conversation.' });
   }
 });
 
