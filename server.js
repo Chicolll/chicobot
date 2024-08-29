@@ -26,6 +26,12 @@ const openai = new OpenAI({
 
 const assistantId = 'asst_cplmQJp8j0qKyABmqM1EWfLt';
 
+// Store conversations in memory
+const conversations = new Map();
+
+// Timeout for inactivity (in milliseconds)
+const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+
 // Function to log conversations
 async function logConversation(threadId, message, response) {
   const logEntry = `
@@ -50,16 +56,30 @@ async function sendEmail(threadId, conversation) {
 
   let mailOptions = {
     from: process.env.EMAIL_USER,
-    to: process.env.EMAIL_USER, // Send to yourself
+    to: 'your-email@example.com', // Replace with your email
     subject: `Conversation Summary - Thread ${threadId}`,
     text: conversation
   };
 
-  try {
-    let info = await transporter.sendMail(mailOptions);
-    console.log('Email sent: ' + info.response);
-  } catch (error) {
-    console.error('Error sending email:', error);
+  await transporter.sendMail(mailOptions);
+  console.log(`Email sent for thread ${threadId}`);
+}
+
+// Function to handle conversation timeout
+function setConversationTimeout(threadId) {
+  if (conversations.has(threadId)) {
+    const { timeoutId } = conversations.get(threadId);
+    if (timeoutId) clearTimeout(timeoutId);
+
+    const newTimeoutId = setTimeout(async () => {
+      const conversation = conversations.get(threadId);
+      if (conversation) {
+        await sendEmail(threadId, conversation.messages.join('\n'));
+        conversations.delete(threadId);
+      }
+    }, INACTIVITY_TIMEOUT);
+
+    conversations.set(threadId, { ...conversations.get(threadId), timeoutId: newTimeoutId });
   }
 }
 
@@ -72,14 +92,14 @@ app.post('/api/chat', async (req, res) => {
     console.log("Received chat request:", req.body);
     const { message, threadId } = req.body;
     let thread;
-    let conversation = '';
 
-    if (threadId) {
+    if (threadId && conversations.has(threadId)) {
       thread = await openai.beta.threads.retrieve(threadId);
       console.log("Retrieved existing thread:", thread.id);
     } else {
       thread = await openai.beta.threads.create();
       console.log("Created new thread:", thread.id);
+      conversations.set(thread.id, { messages: [] });
     }
 
     await openai.beta.threads.messages.create(thread.id, {
@@ -88,7 +108,7 @@ app.post('/api/chat', async (req, res) => {
     });
     console.log("Added user message to thread");
 
-    conversation += `User: ${message}\n`;
+    conversations.get(thread.id).messages.push(`User: ${message}`);
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -132,13 +152,13 @@ app.post('/api/chat', async (req, res) => {
         res.end();
         console.log("Stream ended");
 
-        conversation += `Assistant: ${assistantResponse}\n`;
+        conversations.get(thread.id).messages.push(`Assistant: ${assistantResponse}`);
 
         // Log the conversation
         await logConversation(thread.id, message, assistantResponse);
 
-        // Send email with conversation summary
-        await sendEmail(thread.id, conversation);
+        // Set or reset the inactivity timeout
+        setConversationTimeout(thread.id);
       });
 
     await stream.finalPromise;
@@ -152,11 +172,19 @@ app.post('/api/reset', async (req, res) => {
   try {
     const { threadId } = req.body;
     if (threadId) {
+      // Send email with conversation summary before deleting
+      if (conversations.has(threadId)) {
+        const conversation = conversations.get(threadId);
+        await sendEmail(threadId, conversation.messages.join('\n'));
+        conversations.delete(threadId);
+      }
+
       await openai.beta.threads.del(threadId);
       console.log("Deleted thread:", threadId);
     }
     const newThread = await openai.beta.threads.create();
     console.log("Created new thread:", newThread.id);
+    conversations.set(newThread.id, { messages: [] });
     res.json({ message: 'Chat reset successfully', threadId: newThread.id });
   } catch (error) {
     console.error('Error:', error);
