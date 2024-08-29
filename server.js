@@ -4,6 +4,7 @@ import cors from 'cors';
 import path from 'path';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
+import nodemailer from 'nodemailer';
 
 dotenv.config();
 
@@ -22,6 +23,48 @@ const openai = new OpenAI({
 });
 
 const assistantId = 'asst_cplmQJp8j0qKyABmqM1EWfLt';
+
+// Email configuration
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
+
+// In-memory conversation storage (Note: this will reset on each deployment)
+const conversations = new Map();
+
+// Function to log conversations (in-memory only for Vercel)
+function logConversation(threadId, message, role) {
+  if (!conversations.has(threadId)) {
+    conversations.set(threadId, []);
+  }
+  conversations.get(threadId).push({ role, content: message });
+  console.log(`Logged message for thread ${threadId}: ${role}: ${message}`);
+}
+
+// Function to send email
+async function sendEmailNotification(threadId) {
+  const conversation = conversations.get(threadId);
+  if (!conversation) return;
+
+  const emailContent = conversation.map(msg => `${msg.role}: ${msg.content}`).join('\n\n');
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: process.env.NOTIFICATION_EMAIL,
+    subject: `Conversation Thread: ${threadId}`,
+    text: emailContent
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Email sent for thread ${threadId}`);
+  } catch (error) {
+    console.error('Error sending email:', error);
+  }
+}
 
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -47,6 +90,9 @@ app.post('/api/chat', async (req, res) => {
     });
     console.log("Added user message to thread");
 
+    // Log user message
+    logConversation(thread.id, message, 'user');
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -57,11 +103,14 @@ app.post('/api/chat', async (req, res) => {
       assistant_id: assistantId
     });
 
+    let assistantResponse = '';
+
     stream
       .on('textCreated', (text) => {
         res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`);
       })
       .on('textDelta', (textDelta, snapshot) => {
+        assistantResponse += textDelta.value;
         res.write(`data: ${JSON.stringify({ type: 'delta', content: textDelta.value })}\n\n`);
       })
       .on('toolCallCreated', (toolCall) => {
@@ -81,10 +130,16 @@ app.post('/api/chat', async (req, res) => {
           }
         }
       })
-      .on('end', () => {
+      .on('end', async () => {
         res.write(`data: ${JSON.stringify({ type: 'end', threadId: thread.id })}\n\n`);
         res.end();
         console.log("Stream ended");
+
+        // Log assistant response
+        logConversation(thread.id, assistantResponse, 'assistant');
+
+        // Send email notification
+        await sendEmailNotification(thread.id);
       });
 
     await stream.finalPromise;
@@ -100,6 +155,12 @@ app.post('/api/reset', async (req, res) => {
     if (threadId) {
       await openai.beta.threads.del(threadId);
       console.log("Deleted thread:", threadId);
+      
+      // Send final email notification before resetting
+      await sendEmailNotification(threadId);
+      
+      // Clear conversation from memory
+      conversations.delete(threadId);
     }
     const newThread = await openai.beta.threads.create();
     console.log("Created new thread:", newThread.id);
@@ -110,7 +171,5 @@ app.post('/api/reset', async (req, res) => {
   }
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
-
+// Vercel requires a default export
 export default app;
