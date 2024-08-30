@@ -135,50 +135,66 @@ app.post('/api/chat', async (req, res) => {
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive'
     });
+    console.log("Set response headers for streaming");
 
+    console.log("Creating and streaming run...");
     const stream = await openai.beta.threads.runs.createAndStream(thread.id, {
       assistant_id: assistantId
     });
+    console.log("Stream created");
 
     let assistantResponse = '';
 
     stream
       .on('textCreated', (text) => {
+        console.log("Text created event received");
         res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`);
+        console.log("Sent 'start' event to client");
       })
       .on('textDelta', (textDelta, snapshot) => {
+        console.log("Text delta event received:", textDelta);
         assistantResponse += textDelta.value;
         res.write(`data: ${JSON.stringify({ type: 'delta', content: textDelta.value })}\n\n`);
+        console.log("Sent delta to client:", textDelta.value);
       })
       .on('toolCallCreated', (toolCall) => {
+        console.log("Tool call created event received:", toolCall);
         res.write(`data: ${JSON.stringify({ type: 'toolCall', content: toolCall.type })}\n\n`);
+        console.log("Sent tool call event to client");
       })
       .on('toolCallDelta', (toolCallDelta, snapshot) => {
+        console.log("Tool call delta event received:", toolCallDelta);
         if (toolCallDelta.type === 'code_interpreter') {
           if (toolCallDelta.code_interpreter.input) {
             res.write(`data: ${JSON.stringify({ type: 'toolCallDelta', content: toolCallDelta.code_interpreter.input })}\n\n`);
+            console.log("Sent tool call delta (input) to client");
           }
           if (toolCallDelta.code_interpreter.outputs) {
             toolCallDelta.code_interpreter.outputs.forEach(output => {
               if (output.type === "logs") {
                 res.write(`data: ${JSON.stringify({ type: 'toolCallOutput', content: output.logs })}\n\n`);
+                console.log("Sent tool call output (logs) to client");
               }
             });
           }
         }
       })
       .on('end', async () => {
+        console.log("Stream ended event received");
         res.write(`data: ${JSON.stringify({ type: 'end', threadId: thread.id })}\n\n`);
         res.end();
-        console.log("Stream ended");
+        console.log("Sent 'end' event to client and ended response");
 
         // Log assistant response
         logConversation(thread.id, assistantResponse, 'assistant', ip);
+        console.log("Logged assistant response");
       });
 
+    console.log("Waiting for stream to finish...");
     await stream.finalPromise;
+    console.log("Stream finished");
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error in /api/chat:', error);
     res.status(500).json({ error: 'An error occurred while processing your request.' });
   }
 });
