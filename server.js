@@ -5,8 +5,7 @@ import path from 'path';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
-import geoip from 'geoip-lite';
-import moment from 'moment-timezone';
+import fetch from 'node-fetch';
 
 dotenv.config();
 
@@ -20,58 +19,47 @@ app.use(cors({
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-let openai;
-try {
-  openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
-  });
-} catch (error) {
-  console.error('Error initializing OpenAI:', error);
-}
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 const assistantId = 'asst_cplmQJp8j0qKyABmqM1EWfLt';
 
 // Email configuration
-let transporter;
-try {
-  transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS
-    }
-  });
-} catch (error) {
-  console.error('Error creating nodemailer transporter:', error);
-}
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
 
 // In-memory conversation storage (Note: this will reset on each deployment)
 const conversations = new Map();
+
+// Function to get location from IP using freeipapi.com
+async function getLocationFromIP(ip) {
+  try {
+    const response = await fetch(`https://freeipapi.com/api/json/${ip}`);
+    const data = await response.json();
+    return `${data.cityName}, ${data.regionName}, ${data.countryName}`;
+  } catch (error) {
+    console.error('Error fetching location:', error);
+    return 'Unknown Location';
+  }
+}
 
 // Function to log conversations (in-memory only for Vercel)
 function logConversation(threadId, message, role, ip) {
   if (!conversations.has(threadId)) {
     conversations.set(threadId, {
       messages: [],
-      startTime: Date.now(),
+      startTime: new Date().toLocaleString("en-US", {timeZone: "America/Los_Angeles"}),
       ip: ip
     });
   }
   conversations.get(threadId).messages.push({ role, content: message });
   console.log(`Logged message for thread ${threadId}: ${role}: ${message}`);
-}
-
-// Function to get location from IP
-function getLocationFromIP(ip) {
-  try {
-    const geo = geoip.lookup(ip);
-    if (geo) {
-      return `${geo.city}, ${geo.region}, ${geo.country}`;
-    }
-  } catch (error) {
-    console.error('Error looking up IP:', error);
-  }
-  return 'Unknown Location';
 }
 
 // Function to send email
@@ -82,15 +70,15 @@ async function sendEmailNotification(threadId) {
     return;
   }
 
-  const location = getLocationFromIP(conversation.ip);
-  const startTime = moment(conversation.startTime).tz('America/Los_Angeles');
-  const endTime = moment().tz('America/Los_Angeles');
-  const duration = moment.duration(endTime.diff(startTime));
+  const location = await getLocationFromIP(conversation.ip);
+  const endTime = new Date().toLocaleString("en-US", {timeZone: "America/Los_Angeles"});
+  const duration = (new Date(endTime) - new Date(conversation.startTime)) / 1000; // duration in seconds
 
   const emailContent = `
 Location: ${location}
-Start Time: ${startTime.format('YYYY-MM-DD HH:mm:ss')} (California Time)
-Duration: ${Math.floor(duration.asMinutes())} minutes ${Math.floor(duration.asSeconds()) % 60} seconds
+Start Time: ${conversation.startTime} (California Time)
+End Time: ${endTime} (California Time)
+Duration: ${Math.floor(duration / 60)} minutes ${Math.floor(duration % 60)} seconds
 
 Conversation:
 ${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
@@ -189,7 +177,7 @@ app.post('/api/chat', async (req, res) => {
 
     await stream.finalPromise;
   } catch (error) {
-    console.error('Error in /api/chat:', error);
+    console.error('Error:', error);
     res.status(500).json({ error: 'An error occurred while processing your request.' });
   }
 });
@@ -208,12 +196,11 @@ app.post('/api/reset', async (req, res) => {
     console.log("Created new thread:", newThread.id);
     res.json({ message: 'Chat reset successfully', threadId: newThread.id });
   } catch (error) {
-    console.error('Error in /api/reset:', error);
+    console.error('Error:', error);
     res.status(500).json({ error: 'An error occurred while resetting the chat.' });
   }
 });
 
-// New endpoint to handle conversation end and send email
 app.post('/api/end-conversation', async (req, res) => {
   try {
     const { threadId } = req.body;
@@ -224,16 +211,9 @@ app.post('/api/end-conversation', async (req, res) => {
       res.status(400).json({ error: 'ThreadId is required' });
     }
   } catch (error) {
-    console.error('Error in /api/end-conversation:', error);
+    console.error('Error ending conversation:', error);
     res.status(500).json({ error: 'An error occurred while ending the conversation.' });
   }
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'An unexpected error occurred' });
-});
-
-// Vercel requires a default export
 export default app;
