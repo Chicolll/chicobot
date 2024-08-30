@@ -136,4 +136,88 @@ app.post('/api/chat', async (req, res) => {
       'Connection': 'keep-alive'
     });
 
-    // Send the 'start'
+    const stream = await openai.beta.threads.runs.createAndStream(thread.id, {
+      assistant_id: assistantId
+    });
+
+    let assistantResponse = '';
+
+    stream
+      .on('textCreated', (text) => {
+        res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`);
+      })
+      .on('textDelta', (textDelta, snapshot) => {
+        assistantResponse += textDelta.value;
+        res.write(`data: ${JSON.stringify({ type: 'delta', content: textDelta.value })}\n\n`);
+      })
+      .on('toolCallCreated', (toolCall) => {
+        res.write(`data: ${JSON.stringify({ type: 'toolCall', content: toolCall.type })}\n\n`);
+      })
+      .on('toolCallDelta', (toolCallDelta, snapshot) => {
+        if (toolCallDelta.type === 'code_interpreter') {
+          if (toolCallDelta.code_interpreter.input) {
+            res.write(`data: ${JSON.stringify({ type: 'toolCallDelta', content: toolCallDelta.code_interpreter.input })}\n\n`);
+          }
+          if (toolCallDelta.code_interpreter.outputs) {
+            toolCallDelta.code_interpreter.outputs.forEach(output => {
+              if (output.type === "logs") {
+                res.write(`data: ${JSON.stringify({ type: 'toolCallOutput', content: output.logs })}\n\n`);
+              }
+            });
+          }
+        }
+      })
+      .on('end', async () => {
+        res.write(`data: ${JSON.stringify({ type: 'end', threadId: thread.id })}\n\n`);
+        res.end();
+        console.log("Stream ended");
+
+        // Log assistant response
+        logConversation(thread.id, assistantResponse, 'assistant', ip);
+      });
+
+    await stream.finalPromise;
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'An error occurred while processing your request.' });
+  }
+});
+
+app.post('/api/reset', async (req, res) => {
+  try {
+    const { threadId } = req.body;
+    if (threadId) {
+      await openai.beta.threads.del(threadId);
+      console.log("Deleted thread:", threadId);
+      
+      // Send final email notification before resetting
+      await sendEmailNotification(threadId);
+    }
+    const newThread = await openai.beta.threads.create();
+    console.log("Created new thread:", newThread.id);
+    res.json({ message: 'Chat reset successfully', threadId: newThread.id });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'An error occurred while resetting the chat.' });
+  }
+});
+
+app.post('/api/end-conversation', async (req, res) => {
+  try {
+    const { threadId } = req.body;
+    if (threadId) {
+      await sendEmailNotification(threadId);
+      res.json({ message: 'Conversation ended and email sent successfully' });
+    } else {
+      res.status(400).json({ error: 'ThreadId is required' });
+    }
+  } catch (error) {
+    console.error('Error ending conversation:', error);
+    res.status(500).json({ error: 'An error occurred while ending the conversation.' });
+  }
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Server running on port ${port}`));
+
+export default app;
