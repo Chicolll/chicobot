@@ -136,10 +136,23 @@ app.post('/api/chat', async (req, res) => {
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive'
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'  // Disable buffering for Nginx
     });
     logWithTimestamp("Set response headers for streaming");
+
+    // Function to flush the response
+    const flush = () => {
+      if (res.flush && typeof res.flush === 'function') {
+        res.flush();
+      }
+    };
+
+    // Send an initial message to start the stream
+    res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`);
+    flush();
+    logWithTimestamp("Sent 'start' event to client");
 
     logWithTimestamp("Creating and streaming run...");
     const stream = await openai.beta.threads.runs.createAndStream(thread.id, {
@@ -152,18 +165,18 @@ app.post('/api/chat', async (req, res) => {
     stream
       .on('textCreated', (text) => {
         logWithTimestamp("Text created event received");
-        res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`);
-        logWithTimestamp("Sent 'start' event to client");
       })
       .on('textDelta', (textDelta, snapshot) => {
         logWithTimestamp(`Text delta event received: ${JSON.stringify(textDelta)}`);
         assistantResponse += textDelta.value;
         res.write(`data: ${JSON.stringify({ type: 'delta', content: textDelta.value })}\n\n`);
+        flush();
         logWithTimestamp(`Sent delta to client: ${textDelta.value}`);
       })
       .on('toolCallCreated', (toolCall) => {
         logWithTimestamp(`Tool call created event received: ${JSON.stringify(toolCall)}`);
         res.write(`data: ${JSON.stringify({ type: 'toolCall', content: toolCall.type })}\n\n`);
+        flush();
         logWithTimestamp("Sent tool call event to client");
       })
       .on('toolCallDelta', (toolCallDelta, snapshot) => {
@@ -171,12 +184,14 @@ app.post('/api/chat', async (req, res) => {
         if (toolCallDelta.type === 'code_interpreter') {
           if (toolCallDelta.code_interpreter.input) {
             res.write(`data: ${JSON.stringify({ type: 'toolCallDelta', content: toolCallDelta.code_interpreter.input })}\n\n`);
+            flush();
             logWithTimestamp("Sent tool call delta (input) to client");
           }
           if (toolCallDelta.code_interpreter.outputs) {
             toolCallDelta.code_interpreter.outputs.forEach(output => {
               if (output.type === "logs") {
                 res.write(`data: ${JSON.stringify({ type: 'toolCallOutput', content: output.logs })}\n\n`);
+                flush();
                 logWithTimestamp("Sent tool call output (logs) to client");
               }
             });
