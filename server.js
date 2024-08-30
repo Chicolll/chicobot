@@ -75,6 +75,7 @@ async function sendEmailNotification(threadId) {
   const duration = (new Date(endTime) - new Date(conversation.startTime)) / 1000; // duration in seconds
 
   const emailContent = `
+IP Address: ${conversation.ip}
 Location: ${location}
 Start Time: ${conversation.startTime} (California Time)
 End Time: ${endTime} (California Time)
@@ -135,47 +136,34 @@ app.post('/api/chat', async (req, res) => {
       'Connection': 'keep-alive'
     });
 
-    const stream = await openai.beta.threads.runs.createAndStream(thread.id, {
-      assistant_id: assistantId
+    const run = await openai.beta.threads.runs.create(thread.id, {
+      assistant_id: assistantId,
+      stream: true,
     });
 
     let assistantResponse = '';
 
-    stream
-      .on('textCreated', (text) => {
-        res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`);
-      })
-      .on('textDelta', (textDelta, snapshot) => {
-        assistantResponse += textDelta.value;
-        res.write(`data: ${JSON.stringify({ type: 'delta', content: textDelta.value })}\n\n`);
-      })
-      .on('toolCallCreated', (toolCall) => {
-        res.write(`data: ${JSON.stringify({ type: 'toolCall', content: toolCall.type })}\n\n`);
-      })
-      .on('toolCallDelta', (toolCallDelta, snapshot) => {
-        if (toolCallDelta.type === 'code_interpreter') {
-          if (toolCallDelta.code_interpreter.input) {
-            res.write(`data: ${JSON.stringify({ type: 'toolCallDelta', content: toolCallDelta.code_interpreter.input })}\n\n`);
-          }
-          if (toolCallDelta.code_interpreter.outputs) {
-            toolCallDelta.code_interpreter.outputs.forEach(output => {
-              if (output.type === "logs") {
-                res.write(`data: ${JSON.stringify({ type: 'toolCallOutput', content: output.logs })}\n\n`);
-              }
-            });
-          }
+    for await (const chunk of run) {
+      if (chunk.status === 'completed') {
+        const messages = await openai.beta.threads.messages.list(thread.id);
+        const lastMessage = messages.data[0];
+        if (lastMessage.role === 'assistant') {
+          assistantResponse = lastMessage.content[0].text.value;
+          res.write(`data: ${JSON.stringify({ type: 'delta', content: assistantResponse })}\n\n`);
         }
-      })
-      .on('end', async () => {
-        res.write(`data: ${JSON.stringify({ type: 'end', threadId: thread.id })}\n\n`);
-        res.end();
-        console.log("Stream ended");
+      } else if (chunk.status === 'failed') {
+        console.error('Run failed:', chunk.last_error);
+        res.write(`data: ${JSON.stringify({ type: 'error', content: 'An error occurred' })}\n\n`);
+      }
+    }
 
-        // Log assistant response
-        logConversation(thread.id, assistantResponse, 'assistant', ip);
-      });
+    res.write(`data: ${JSON.stringify({ type: 'end', threadId: thread.id })}\n\n`);
+    res.end();
+    console.log("Stream ended");
 
-    await stream.finalPromise;
+    // Log assistant response
+    logConversation(thread.id, assistantResponse, 'assistant', ip);
+
   } catch (error) {
     console.error('Error:', error);
     res.status(500).json({ error: 'An error occurred while processing your request.' });
