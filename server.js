@@ -6,7 +6,7 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
 import fetch from 'node-fetch';
-import http from 'http';
+import session from 'express-session';
 
 dotenv.config();
 
@@ -14,13 +14,21 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const server = http.createServer(app);
 
 app.use(cors({
-  origin: ['https://www.chicoliu.com', 'https://www.chicoliu.webflow.io']
+  origin: ['https://www.chicoliu.com', 'https://www.chicoliu.webflow.io'],
+  credentials: true
 }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Add session middleware
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'your-secret-key',
+  resave: false,
+  saveUninitialized: true,
+  cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000 } // 24 hours
+}));
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
@@ -56,26 +64,36 @@ async function getLocationFromIP(ip) {
 }
 
 // Function to log conversations (in-memory only for Vercel)
-function logConversation(threadId, message, role, ip) {
-  if (!conversations.has(threadId)) {
-    conversations.set(threadId, {
+function logConversation(sessionId, message, role, ip) {
+  if (!conversations.has(sessionId)) {
+    conversations.set(sessionId, {
       messages: [],
       startTime: new Date().toLocaleString("en-US", {timeZone: "America/Los_Angeles"}),
       lastActivityTime: Date.now(),
-      ip: ip
+      ip: ip,
+      timeoutId: null
     });
   } else {
-    conversations.get(threadId).lastActivityTime = Date.now();
+    clearTimeout(conversations.get(sessionId).timeoutId);
   }
-  conversations.get(threadId).messages.push({ role, content: message });
-  console.log(`Logged message for thread ${threadId}: ${role}: ${message}`);
+  
+  const conversation = conversations.get(sessionId);
+  conversation.messages.push({ role, content: message });
+  conversation.lastActivityTime = Date.now();
+  
+  // Set a new timeout for this conversation
+  conversation.timeoutId = setTimeout(() => {
+    sendEmailNotification(sessionId);
+  }, CONVERSATION_TIMEOUT);
+
+  console.log(`Logged message for session ${sessionId}: ${role}: ${message}`);
 }
 
 // Function to send email
-async function sendEmailNotification(threadId) {
-  const conversation = conversations.get(threadId);
+async function sendEmailNotification(sessionId) {
+  const conversation = conversations.get(sessionId);
   if (!conversation || conversation.messages.length === 0) {
-    console.log(`No conversation to send for thread ${threadId}`);
+    console.log(`No conversation to send for session ${sessionId}`);
     return;
   }
 
@@ -103,27 +121,14 @@ ${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
 
   try {
     await transporter.sendMail(mailOptions);
-    console.log(`Email sent for thread ${threadId}`);
+    console.log(`Email sent for session ${sessionId}`);
     // Clear the conversation after sending email
-    conversations.delete(threadId);
+    clearTimeout(conversation.timeoutId);
+    conversations.delete(sessionId);
   } catch (error) {
     console.error('Error sending email:', error);
   }
 }
-
-// Function to check for timed out conversations
-function checkConversationTimeouts() {
-  const now = Date.now();
-  for (const [threadId, conversation] of conversations.entries()) {
-    if (now - conversation.lastActivityTime > CONVERSATION_TIMEOUT) {
-      console.log(`Conversation ${threadId} timed out. Sending email notification.`);
-      sendEmailNotification(threadId);
-    }
-  }
-}
-
-// Set up interval to check for timed out conversations
-setInterval(checkConversationTimeouts, 60000); // Check every minute
 
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -139,6 +144,9 @@ app.post('/api/chat', async (req, res) => {
     const { message, threadId } = req.body;
     const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
 
+    // Use session ID to maintain conversation across refreshes
+    const sessionId = req.session.id;
+
     let thread;
     if (threadId) {
       thread = await openai.beta.threads.retrieve(threadId);
@@ -146,10 +154,11 @@ app.post('/api/chat', async (req, res) => {
     } else {
       thread = await openai.beta.threads.create();
       logWithTimestamp("Created new thread: " + thread.id);
+      req.session.threadId = thread.id;
     }
 
     // Log user message
-    logConversation(thread.id, message, 'user', ip);
+    logConversation(sessionId, message, 'user', ip);
 
     await openai.beta.threads.messages.create(thread.id, {
       role: "user",
@@ -163,12 +172,6 @@ app.post('/api/chat', async (req, res) => {
       'Connection': 'keep-alive'
     });
     logWithTimestamp("Set response headers for streaming");
-
-    // Handle client disconnect
-    req.on('close', () => {
-      sendEmailNotification(thread.id);
-      logWithTimestamp(`Client disconnected for thread ${thread.id}. Sending email notification.`);
-    });
 
     logWithTimestamp("Creating and streaming run...");
     const stream = await openai.beta.threads.runs.createAndStream(thread.id, {
@@ -219,7 +222,7 @@ app.post('/api/chat', async (req, res) => {
         logWithTimestamp("Sent 'end' event to client and ended response");
 
         // Log assistant response
-        logConversation(thread.id, assistantResponse, 'assistant', ip);
+        logConversation(sessionId, assistantResponse, 'assistant', ip);
         logWithTimestamp("Logged assistant response");
       });
 
@@ -234,16 +237,17 @@ app.post('/api/chat', async (req, res) => {
 
 app.post('/api/reset', async (req, res) => {
   try {
-    const { threadId } = req.body;
+    const threadId = req.session.threadId;
     if (threadId) {
       await openai.beta.threads.del(threadId);
       console.log("Deleted thread:", threadId);
       
       // Send final email notification before resetting
-      await sendEmailNotification(threadId);
+      await sendEmailNotification(req.session.id);
     }
     const newThread = await openai.beta.threads.create();
     console.log("Created new thread:", newThread.id);
+    req.session.threadId = newThread.id;
     res.json({ message: 'Chat reset successfully', threadId: newThread.id });
   } catch (error) {
     console.error('Error:', error);
@@ -251,32 +255,7 @@ app.post('/api/reset', async (req, res) => {
   }
 });
 
-app.post('/api/end-conversation', async (req, res) => {
-  try {
-    const { threadId } = req.body;
-    if (threadId) {
-      await sendEmailNotification(threadId);
-      res.json({ message: 'Conversation ended and email sent successfully' });
-    } else {
-      res.status(400).json({ error: 'ThreadId is required' });
-    }
-  } catch (error) {
-    console.error('Error ending conversation:', error);
-    res.status(500).json({ error: 'An error occurred while ending the conversation.' });
-  }
-});
-
-app.post('/api/ping', (req, res) => {
-  const { threadId } = req.body;
-  if (threadId && conversations.has(threadId)) {
-    conversations.get(threadId).lastActivityTime = Date.now();
-    res.status(200).json({ message: 'Ping received' });
-  } else {
-    res.status(404).json({ error: 'Thread not found' });
-  }
-});
-
 const port = process.env.PORT || 3000;
-server.listen(port, () => console.log(`Server running on port ${port}`));
+app.listen(port, () => console.log(`Server running on port ${port}`));
 
 export default app;
