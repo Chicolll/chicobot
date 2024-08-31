@@ -49,7 +49,7 @@ const transporter = nodemailer.createTransport({
 const conversations = new Map();
 
 // Timeout for conversations (5 minutes)
-const CONVERSATION_TIMEOUT = 1/4 * 60 * 1000; // 5 minutes in milliseconds
+const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes in milliseconds
 
 // Function to get location from IP using freeipapi.com
 async function getLocationFromIP(ip) {
