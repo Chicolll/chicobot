@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
 import fetch from 'node-fetch';
+import http from 'http';
 
 dotenv.config();
 
@@ -13,6 +14,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+const server = http.createServer(app);
+
 app.use(cors({
   origin: ['https://www.chicoliu.com', 'https://www.chicoliu.webflow.io']
 }));
@@ -39,6 +42,9 @@ const conversations = new Map();
 
 // Timeout for conversations (5 minutes)
 const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes in milliseconds
+
+// Store active connections
+const activeConnections = new Map();
 
 // Function to get location from IP using freeipapi.com
 async function getLocationFromIP(ip) {
@@ -161,6 +167,16 @@ app.post('/api/chat', async (req, res) => {
     });
     logWithTimestamp("Set response headers for streaming");
 
+    // Store the response object for this connection
+    activeConnections.set(thread.id, res);
+
+    // Handle client disconnect
+    req.on('close', () => {
+      activeConnections.delete(thread.id);
+      sendEmailNotification(thread.id);
+      logWithTimestamp(`Client disconnected for thread ${thread.id}. Sending email notification.`);
+    });
+
     logWithTimestamp("Creating and streaming run...");
     const stream = await openai.beta.threads.runs.createAndStream(thread.id, {
       assistant_id: assistantId
@@ -212,6 +228,9 @@ app.post('/api/chat', async (req, res) => {
         // Log assistant response
         logConversation(thread.id, assistantResponse, 'assistant', ip);
         logWithTimestamp("Logged assistant response");
+
+        // Remove the connection from active connections
+        activeConnections.delete(thread.id);
       });
 
     logWithTimestamp("Waiting for stream to finish...");
@@ -258,6 +277,6 @@ app.post('/api/end-conversation', async (req, res) => {
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+server.listen(port, () => console.log(`Server running on port ${port}`));
 
 export default app;
