@@ -37,6 +37,9 @@ const transporter = nodemailer.createTransport({
 // In-memory conversation storage (Note: this will reset on each deployment)
 const conversations = new Map();
 
+// Timeout for conversations (5 minutes)
+const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes in milliseconds
+
 // Function to get location from IP using freeipapi.com
 async function getLocationFromIP(ip) {
   try {
@@ -55,8 +58,11 @@ function logConversation(threadId, message, role, ip) {
     conversations.set(threadId, {
       messages: [],
       startTime: new Date().toLocaleString("en-US", {timeZone: "America/Los_Angeles"}),
+      lastActivityTime: Date.now(),
       ip: ip
     });
+  } else {
+    conversations.get(threadId).lastActivityTime = Date.now();
   }
   conversations.get(threadId).messages.push({ role, content: message });
   console.log(`Logged message for thread ${threadId}: ${role}: ${message}`);
@@ -102,6 +108,20 @@ ${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
   }
 }
 
+// Function to check for timed out conversations
+function checkConversationTimeouts() {
+  const now = Date.now();
+  for (const [threadId, conversation] of conversations.entries()) {
+    if (now - conversation.lastActivityTime > CONVERSATION_TIMEOUT) {
+      console.log(`Conversation ${threadId} timed out. Sending email notification.`);
+      sendEmailNotification(threadId);
+    }
+  }
+}
+
+// Set up interval to check for timed out conversations
+setInterval(checkConversationTimeouts, 60000); // Check every minute
+
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -136,23 +156,10 @@ app.post('/api/chat', async (req, res) => {
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no'  // Disable buffering for Nginx
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive'
     });
     logWithTimestamp("Set response headers for streaming");
-
-    // Function to flush the response
-    const flush = () => {
-      if (res.flush && typeof res.flush === 'function') {
-        res.flush();
-      }
-    };
-
-    // Send an initial message to start the stream
-    res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`);
-    flush();
-    logWithTimestamp("Sent 'start' event to client");
 
     logWithTimestamp("Creating and streaming run...");
     const stream = await openai.beta.threads.runs.createAndStream(thread.id, {
@@ -165,18 +172,18 @@ app.post('/api/chat', async (req, res) => {
     stream
       .on('textCreated', (text) => {
         logWithTimestamp("Text created event received");
+        res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`);
+        logWithTimestamp("Sent 'start' event to client");
       })
       .on('textDelta', (textDelta, snapshot) => {
         logWithTimestamp(`Text delta event received: ${JSON.stringify(textDelta)}`);
         assistantResponse += textDelta.value;
         res.write(`data: ${JSON.stringify({ type: 'delta', content: textDelta.value })}\n\n`);
-        flush();
         logWithTimestamp(`Sent delta to client: ${textDelta.value}`);
       })
       .on('toolCallCreated', (toolCall) => {
         logWithTimestamp(`Tool call created event received: ${JSON.stringify(toolCall)}`);
         res.write(`data: ${JSON.stringify({ type: 'toolCall', content: toolCall.type })}\n\n`);
-        flush();
         logWithTimestamp("Sent tool call event to client");
       })
       .on('toolCallDelta', (toolCallDelta, snapshot) => {
@@ -184,14 +191,12 @@ app.post('/api/chat', async (req, res) => {
         if (toolCallDelta.type === 'code_interpreter') {
           if (toolCallDelta.code_interpreter.input) {
             res.write(`data: ${JSON.stringify({ type: 'toolCallDelta', content: toolCallDelta.code_interpreter.input })}\n\n`);
-            flush();
             logWithTimestamp("Sent tool call delta (input) to client");
           }
           if (toolCallDelta.code_interpreter.outputs) {
             toolCallDelta.code_interpreter.outputs.forEach(output => {
               if (output.type === "logs") {
                 res.write(`data: ${JSON.stringify({ type: 'toolCallOutput', content: output.logs })}\n\n`);
-                flush();
                 logWithTimestamp("Sent tool call output (logs) to client");
               }
             });
