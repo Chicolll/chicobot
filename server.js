@@ -63,7 +63,7 @@ async function getLocationFromIP(ip) {
   }
 }
 
-// Function to log conversations (in-memory only for Vercel)
+// Modified function to log conversations
 function logConversation(sessionId, message, role, ip) {
   if (!conversations.has(sessionId)) {
     conversations.set(sessionId, {
@@ -71,7 +71,8 @@ function logConversation(sessionId, message, role, ip) {
       startTime: new Date().toLocaleString("en-US", {timeZone: "America/Los_Angeles"}),
       lastActivityTime: Date.now(),
       ip: ip,
-      timeoutId: null
+      timeoutId: null,
+      timeoutCallback: null
     });
   } else {
     clearTimeout(conversations.get(sessionId).timeoutId);
@@ -82,9 +83,8 @@ function logConversation(sessionId, message, role, ip) {
   conversation.lastActivityTime = Date.now();
   
   // Set a new timeout for this conversation
-  conversation.timeoutId = setTimeout(() => {
-    sendEmailNotification(sessionId);
-  }, CONVERSATION_TIMEOUT);
+  conversation.timeoutCallback = () => sendEmailNotification(sessionId);
+  conversation.timeoutId = setTimeout(conversation.timeoutCallback, CONVERSATION_TIMEOUT);
 
   console.log(`Logged message for session ${sessionId}: ${role}: ${message}`);
 }
@@ -255,7 +255,42 @@ app.post('/api/reset', async (req, res) => {
   }
 });
 
+// Graceful shutdown handler
+let isShuttingDown = false;
+
+function gracefulShutdown() {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.log('Starting graceful shutdown');
+
+  // Force execution of all pending timeouts
+  for (const [sessionId, conversation] of conversations) {
+    clearTimeout(conversation.timeoutId);
+    if (conversation.timeoutCallback) {
+      console.log(`Forcing timeout execution for session ${sessionId}`);
+      conversation.timeoutCallback();
+    }
+  }
+
+  // Wait for any pending operations (like email sending) to complete
+  setTimeout(() => {
+    console.log('Graceful shutdown complete');
+    process.exit(0);
+  }, 5000); // Wait for 5 seconds to allow operations to complete
+}
+
+// Register the graceful shutdown handler
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
+
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+const server = app.listen(port, () => console.log(`Server running on port ${port}`));
+
+// Ensure the server closes on exit
+process.on('exit', () => {
+  console.log('Closing server');
+  server.close();
+});
 
 export default app;
