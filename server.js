@@ -22,11 +22,12 @@ app.use(cors({
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Add session middleware
 app.use(session({
   secret: process.env.SESSION_SECRET || 'your-secret-key',
   resave: false,
   saveUninitialized: true,
-  cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000 }
+  cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000 } // 24 hours
 }));
 
 const openai = new OpenAI({
@@ -35,6 +36,7 @@ const openai = new OpenAI({
 
 const assistantId = 'asst_cplmQJp8j0qKyABmqM1EWfLt';
 
+// Email configuration
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
@@ -43,9 +45,13 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+// In-memory conversation storage (Note: this will reset on each deployment)
 const conversations = new Map();
-const CONVERSATION_TIMEOUT = 15 * 1000; // 15 seconds
 
+// Timeout for conversations (5 minutes)
+const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes in milliseconds
+
+// Function to get location from IP using freeipapi.com
 async function getLocationFromIP(ip) {
   try {
     const response = await fetch(`https://freeipapi.com/api/json/${ip}`);
@@ -57,31 +63,33 @@ async function getLocationFromIP(ip) {
   }
 }
 
+// Function to log conversations (in-memory only for Vercel)
 function logConversation(sessionId, message, role, ip) {
-  let conversation = conversations.get(sessionId);
-  if (!conversation) {
-    conversation = {
+  if (!conversations.has(sessionId)) {
+    conversations.set(sessionId, {
       messages: [],
       startTime: new Date().toLocaleString("en-US", {timeZone: "America/Los_Angeles"}),
       lastActivityTime: Date.now(),
       ip: ip,
       timeoutId: null
-    };
-    conversations.set(sessionId, conversation);
+    });
+  } else {
+    clearTimeout(conversations.get(sessionId).timeoutId);
   }
   
+  const conversation = conversations.get(sessionId);
   conversation.messages.push({ role, content: message });
   conversation.lastActivityTime = Date.now();
   
-  // Clear existing timeout and set a new one
-  if (conversation.timeoutId) {
-    clearTimeout(conversation.timeoutId);
-  }
-  conversation.timeoutId = setTimeout(() => sendEmailNotification(sessionId), CONVERSATION_TIMEOUT);
+  // Set a new timeout for this conversation
+  conversation.timeoutId = setTimeout(() => {
+    sendEmailNotification(sessionId);
+  }, CONVERSATION_TIMEOUT);
 
   console.log(`Logged message for session ${sessionId}: ${role}: ${message}`);
 }
 
+// Function to send email
 async function sendEmailNotification(sessionId) {
   const conversation = conversations.get(sessionId);
   if (!conversation || conversation.messages.length === 0) {
@@ -91,7 +99,7 @@ async function sendEmailNotification(sessionId) {
 
   const location = await getLocationFromIP(conversation.ip);
   const endTime = new Date().toLocaleString("en-US", {timeZone: "America/Los_Angeles"});
-  const duration = (new Date(endTime) - new Date(conversation.startTime)) / 1000;
+  const duration = (new Date(endTime) - new Date(conversation.startTime)) / 1000; // duration in seconds
 
   const emailContent = `
 IP Address: ${conversation.ip}
@@ -114,10 +122,11 @@ ${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
   try {
     await transporter.sendMail(mailOptions);
     console.log(`Email sent for session ${sessionId}`);
+    // Clear the conversation after sending email
+    clearTimeout(conversation.timeoutId);
+    conversations.delete(sessionId);
   } catch (error) {
     console.error('Error sending email:', error);
-  } finally {
-    conversations.delete(sessionId);
   }
 }
 
@@ -134,6 +143,8 @@ app.post('/api/chat', async (req, res) => {
     logWithTimestamp("Received chat request: " + JSON.stringify(req.body));
     const { message, threadId } = req.body;
     const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+
+    // Use session ID to maintain conversation across refreshes
     const sessionId = req.session.id;
 
     let thread;
@@ -146,6 +157,7 @@ app.post('/api/chat', async (req, res) => {
       req.session.threadId = thread.id;
     }
 
+    // Log user message
     logConversation(sessionId, message, 'user', ip);
 
     await openai.beta.threads.messages.create(thread.id, {
@@ -209,6 +221,7 @@ app.post('/api/chat', async (req, res) => {
         res.end();
         logWithTimestamp("Sent 'end' event to client and ended response");
 
+        // Log assistant response
         logConversation(sessionId, assistantResponse, 'assistant', ip);
         logWithTimestamp("Logged assistant response");
       });
@@ -229,7 +242,7 @@ app.post('/api/reset', async (req, res) => {
       await openai.beta.threads.del(threadId);
       console.log("Deleted thread:", threadId);
       
-      // Trigger email sending immediately for the reset action
+      // Send final email notification before resetting
       await sendEmailNotification(req.session.id);
     }
     const newThread = await openai.beta.threads.create();
@@ -242,41 +255,7 @@ app.post('/api/reset', async (req, res) => {
   }
 });
 
-let isShuttingDown = false;
-const pendingEmails = new Set();
-
-async function gracefulShutdown() {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-
-  console.log('Starting graceful shutdown');
-
-  // Trigger email sending for all active conversations
-  for (const [sessionId, conversation] of conversations) {
-    clearTimeout(conversation.timeoutId);
-    pendingEmails.add(sendEmailNotification(sessionId));
-  }
-
-  // Wait for all pending emails to be sent
-  if (pendingEmails.size > 0) {
-    console.log(`Waiting for ${pendingEmails.size} emails to be sent...`);
-    await Promise.all(pendingEmails);
-    console.log('All pending emails have been sent.');
-  }
-
-  console.log('Graceful shutdown complete');
-  process.exit(0);
-}
-
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', gracefulShutdown);
-
 const port = process.env.PORT || 3000;
-const server = app.listen(port, () => console.log(`Server running on port ${port}`));
-
-process.on('exit', () => {
-  console.log('Closing server');
-  server.close();
-});
+app.listen(port, () => console.log(`Server running on port ${port}`));
 
 export default app;
