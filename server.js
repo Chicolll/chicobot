@@ -22,11 +22,16 @@ app.use(cors({
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Updated session configuration
 app.use(session({
   secret: process.env.SESSION_SECRET || 'your-secret-key',
   resave: false,
   saveUninitialized: true,
-  cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000 }
+  cookie: { 
+    secure: process.env.NODE_ENV === 'production', 
+    maxAge: 24 * 60 * 60 * 1000,
+    httpOnly: true
+  }
 }));
 
 const openai = new OpenAI({
@@ -154,11 +159,16 @@ app.post('/api/chat', async (req, res) => {
 
     logWithTimestamp(`Processing request for session ${sessionId}`);
     console.log('Current conversations:', JSON.stringify([...conversations.keys()]));
+    console.log('Session data:', JSON.stringify(req.session));
 
     let thread;
-    if (threadId) {
+    if (req.session.threadId) {
+      thread = await openai.beta.threads.retrieve(req.session.threadId);
+      logWithTimestamp("Retrieved existing thread from session: " + thread.id);
+    } else if (threadId) {
       thread = await openai.beta.threads.retrieve(threadId);
-      logWithTimestamp("Retrieved existing thread: " + thread.id);
+      logWithTimestamp("Retrieved existing thread from request: " + thread.id);
+      req.session.threadId = thread.id;
     } else {
       thread = await openai.beta.threads.create();
       logWithTimestamp("Created new thread: " + thread.id);
@@ -244,6 +254,8 @@ app.post('/api/chat', async (req, res) => {
 app.post('/api/reset', async (req, res) => {
   const sessionId = req.session.id;
   console.log(`Resetting chat for session ${sessionId}`);
+  console.log('Session data before reset:', JSON.stringify(req.session));
+  
   try {
     const threadId = req.session.threadId;
     if (threadId) {
@@ -260,9 +272,12 @@ app.post('/api/reset', async (req, res) => {
     } else {
       console.log(`No thread ID found for session ${sessionId}`);
     }
+    
     const newThread = await openai.beta.threads.create();
     console.log("Created new thread:", newThread.id);
     req.session.threadId = newThread.id;
+    
+    console.log('Session data after reset:', JSON.stringify(req.session));
     res.json({ message: 'Chat reset successfully', threadId: newThread.id });
   } catch (error) {
     console.error('Error in /api/reset:', error);
@@ -273,6 +288,8 @@ app.post('/api/reset', async (req, res) => {
 app.post('/api/trigger-email', (req, res) => {
   const sessionId = req.session.id;
   console.log(`Manual email trigger for session ${sessionId}`);
+  console.log('Session data:', JSON.stringify(req.session));
+  
   if (conversations.has(sessionId)) {
     sendEmailNotification(sessionId)
       .then(() => {
