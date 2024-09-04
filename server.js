@@ -22,12 +22,11 @@ app.use(cors({
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Add session middleware
 app.use(session({
   secret: process.env.SESSION_SECRET || 'your-secret-key',
   resave: false,
   saveUninitialized: true,
-  cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000 } // 24 hours
+  cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000 }
 }));
 
 const openai = new OpenAI({
@@ -36,7 +35,7 @@ const openai = new OpenAI({
 
 const assistantId = 'asst_cplmQJp8j0qKyABmqM1EWfLt';
 
-// Email configuration
+// Email configuration with verification
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
@@ -45,13 +44,18 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// In-memory conversation storage (Note: this will reset on each deployment)
+// Verify email configuration
+transporter.verify(function(error, success) {
+  if (error) {
+    console.log("Email configuration error:", error);
+  } else {
+    console.log("Email server is ready to send messages");
+  }
+});
+
 const conversations = new Map();
+const CONVERSATION_TIMEOUT = 15 * 1000; // 15 seconds
 
-// Timeout for conversations (5 minutes)
-const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes in milliseconds
-
-// Function to get location from IP using freeipapi.com
 async function getLocationFromIP(ip) {
   try {
     const response = await fetch(`https://freeipapi.com/api/json/${ip}`);
@@ -63,34 +67,36 @@ async function getLocationFromIP(ip) {
   }
 }
 
-// Function to log conversations (in-memory only for Vercel)
 function logConversation(sessionId, message, role, ip) {
-  if (!conversations.has(sessionId)) {
-    conversations.set(sessionId, {
+  console.log(`Logging conversation for session ${sessionId}`);
+  let conversation = conversations.get(sessionId);
+  if (!conversation) {
+    conversation = {
       messages: [],
       startTime: new Date().toLocaleString("en-US", {timeZone: "America/Los_Angeles"}),
       lastActivityTime: Date.now(),
       ip: ip,
       timeoutId: null
-    });
-  } else {
-    clearTimeout(conversations.get(sessionId).timeoutId);
+    };
+    conversations.set(sessionId, conversation);
+    console.log(`Created new conversation for session ${sessionId}`);
   }
   
-  const conversation = conversations.get(sessionId);
   conversation.messages.push({ role, content: message });
   conversation.lastActivityTime = Date.now();
   
-  // Set a new timeout for this conversation
-  conversation.timeoutId = setTimeout(() => {
-    sendEmailNotification(sessionId);
-  }, CONVERSATION_TIMEOUT);
+  if (conversation.timeoutId) {
+    clearTimeout(conversation.timeoutId);
+    console.log(`Cleared existing timeout for session ${sessionId}`);
+  }
+  conversation.timeoutId = setTimeout(() => sendEmailNotification(sessionId), CONVERSATION_TIMEOUT);
+  console.log(`Set new timeout for session ${sessionId}`);
 
   console.log(`Logged message for session ${sessionId}: ${role}: ${message}`);
 }
 
-// Function to send email
 async function sendEmailNotification(sessionId) {
+  console.log(`Attempting to send email for session ${sessionId}`);
   const conversation = conversations.get(sessionId);
   if (!conversation || conversation.messages.length === 0) {
     console.log(`No conversation to send for session ${sessionId}`);
@@ -99,7 +105,7 @@ async function sendEmailNotification(sessionId) {
 
   const location = await getLocationFromIP(conversation.ip);
   const endTime = new Date().toLocaleString("en-US", {timeZone: "America/Los_Angeles"});
-  const duration = (new Date(endTime) - new Date(conversation.startTime)) / 1000; // duration in seconds
+  const duration = (new Date(endTime) - new Date(conversation.startTime)) / 1000;
 
   const emailContent = `
 IP Address: ${conversation.ip}
@@ -120,13 +126,14 @@ ${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
   };
 
   try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Email sent for session ${sessionId}`);
-    // Clear the conversation after sending email
-    clearTimeout(conversation.timeoutId);
-    conversations.delete(sessionId);
+    console.log('Sending email with options:', JSON.stringify(mailOptions, null, 2));
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`Email sent for session ${sessionId}:`, info.response);
   } catch (error) {
     console.error('Error sending email:', error);
+  } finally {
+    conversations.delete(sessionId);
+    console.log(`Conversation deleted for session ${sessionId}`);
   }
 }
 
@@ -143,9 +150,10 @@ app.post('/api/chat', async (req, res) => {
     logWithTimestamp("Received chat request: " + JSON.stringify(req.body));
     const { message, threadId } = req.body;
     const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-
-    // Use session ID to maintain conversation across refreshes
     const sessionId = req.session.id;
+
+    logWithTimestamp(`Processing request for session ${sessionId}`);
+    console.log('Current conversations:', JSON.stringify([...conversations.keys()]));
 
     let thread;
     if (threadId) {
@@ -157,7 +165,6 @@ app.post('/api/chat', async (req, res) => {
       req.session.threadId = thread.id;
     }
 
-    // Log user message
     logConversation(sessionId, message, 'user', ip);
 
     await openai.beta.threads.messages.create(thread.id, {
@@ -221,7 +228,6 @@ app.post('/api/chat', async (req, res) => {
         res.end();
         logWithTimestamp("Sent 'end' event to client and ended response");
 
-        // Log assistant response
         logConversation(sessionId, assistantResponse, 'assistant', ip);
         logWithTimestamp("Logged assistant response");
       });
@@ -236,26 +242,87 @@ app.post('/api/chat', async (req, res) => {
 });
 
 app.post('/api/reset', async (req, res) => {
+  const sessionId = req.session.id;
+  console.log(`Resetting chat for session ${sessionId}`);
   try {
     const threadId = req.session.threadId;
     if (threadId) {
       await openai.beta.threads.del(threadId);
       console.log("Deleted thread:", threadId);
       
-      // Send final email notification before resetting
-      await sendEmailNotification(req.session.id);
+      // Trigger email sending immediately for the reset action
+      if (conversations.has(sessionId)) {
+        console.log(`Triggering email send for session ${sessionId}`);
+        await sendEmailNotification(sessionId);
+      } else {
+        console.log(`No conversation found for session ${sessionId}`);
+      }
+    } else {
+      console.log(`No thread ID found for session ${sessionId}`);
     }
     const newThread = await openai.beta.threads.create();
     console.log("Created new thread:", newThread.id);
     req.session.threadId = newThread.id;
     res.json({ message: 'Chat reset successfully', threadId: newThread.id });
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error in /api/reset:', error);
     res.status(500).json({ error: 'An error occurred while resetting the chat.' });
   }
 });
 
+app.post('/api/trigger-email', (req, res) => {
+  const sessionId = req.session.id;
+  console.log(`Manual email trigger for session ${sessionId}`);
+  if (conversations.has(sessionId)) {
+    sendEmailNotification(sessionId)
+      .then(() => {
+        res.json({ message: 'Email sending triggered successfully' });
+      })
+      .catch((error) => {
+        console.error('Error triggering email:', error);
+        res.status(500).json({ error: 'Failed to trigger email sending' });
+      });
+  } else {
+    console.log(`No conversation found for session ${sessionId}`);
+    res.status(404).json({ error: 'No conversation found for this session' });
+  }
+});
+
+let isShuttingDown = false;
+const pendingEmails = new Set();
+
+async function gracefulShutdown() {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.log('Starting graceful shutdown');
+
+  // Trigger email sending for all active conversations
+  for (const [sessionId, conversation] of conversations) {
+    clearTimeout(conversation.timeoutId);
+    pendingEmails.add(sendEmailNotification(sessionId));
+  }
+
+  // Wait for all pending emails to be sent
+  if (pendingEmails.size > 0) {
+    console.log(`Waiting for ${pendingEmails.size} emails to be sent...`);
+    await Promise.all(pendingEmails);
+    console.log('All pending emails have been sent.');
+  }
+
+  console.log('Graceful shutdown complete');
+  process.exit(0);
+}
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
+
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+const server = app.listen(port, () => console.log(`Server running on port ${port}`));
+
+process.on('exit', () => {
+  console.log('Closing server');
+  server.close();
+});
 
 export default app;
