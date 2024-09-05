@@ -43,6 +43,9 @@ const CONVERSATION_TIMEOUT = 2 * 60 * 1000; // 2 minutes in milliseconds
 // Maximum session duration (90 minutes)
 const MAX_SESSION_DURATION = 90 * 60 * 1000; // 90 minutes in milliseconds
 
+// Interval for checking conversations (every 30 seconds)
+const CHECK_INTERVAL = 30 * 1000; // 30 seconds in milliseconds
+
 // Function to get location from IP using freeipapi.com
 async function getLocationFromIP(ip) {
   try {
@@ -64,8 +67,7 @@ function logConversation(threadId, message, role, ip) {
       messages: [],
       startTime: Date.now(),
       lastActivityTime: Date.now(),
-      ip: ip,
-      timeoutId: null
+      ip: ip
     });
   }
   
@@ -73,49 +75,31 @@ function logConversation(threadId, message, role, ip) {
   conversation.messages.push({ role, content: message });
   conversation.lastActivityTime = Date.now();
   
-  // Clear existing timeout
-  if (conversation.timeoutId) {
-    console.log(`Clearing existing timeout for thread ${threadId}`);
-    clearTimeout(conversation.timeoutId);
-  }
-  
-  // Set new timeout
-  console.log(`Setting new timeout for thread ${threadId}`);
-  conversation.timeoutId = setTimeout(() => {
-    console.log(`Timeout triggered for thread ${threadId}`);
-    checkAndEndConversation(threadId).catch(error => {
-      console.error(`Error in checkAndEndConversation for thread ${threadId}:`, error);
-    });
-  }, CONVERSATION_TIMEOUT);
-  
   console.log(`Logged message for thread ${threadId}: ${role}: ${message}`);
 }
 
-// Function to check and end conversation if necessary
-async function checkAndEndConversation(threadId) {
-  console.log(`Checking conversation ${threadId} for timeout`);
-  const conversation = conversations.get(threadId);
-  if (!conversation) {
-    console.log(`No conversation found for thread ${threadId}`);
-    return;
-  }
-
+// Function to check and end conversations if necessary
+async function checkConversations() {
+  console.log('Checking all conversations');
   const now = Date.now();
-  const inactiveDuration = now - conversation.lastActivityTime;
-  const totalDuration = now - conversation.startTime;
+  for (const [threadId, conversation] of conversations.entries()) {
+    const inactiveDuration = now - conversation.lastActivityTime;
+    const totalDuration = now - conversation.startTime;
 
-  console.log(`Thread ${threadId} - Inactive duration: ${inactiveDuration}ms, Total duration: ${totalDuration}ms`);
+    console.log(`Thread ${threadId} - Inactive duration: ${inactiveDuration}ms, Total duration: ${totalDuration}ms`);
 
-  if (inactiveDuration >= CONVERSATION_TIMEOUT || totalDuration >= MAX_SESSION_DURATION) {
-    const reason = inactiveDuration >= CONVERSATION_TIMEOUT ? 'Inactivity timeout' : 'Max session duration reached';
-    console.log(`Ending conversation ${threadId} due to ${reason}`);
-    await sendEmailNotification(threadId, reason);
-    conversations.delete(threadId);
-    console.log(`Conversation ${threadId} ended and removed from memory`);
-  } else {
-    console.log(`Conversation ${threadId} is still active`);
+    if (inactiveDuration >= CONVERSATION_TIMEOUT || totalDuration >= MAX_SESSION_DURATION) {
+      const reason = inactiveDuration >= CONVERSATION_TIMEOUT ? 'Inactivity timeout' : 'Max session duration reached';
+      console.log(`Ending conversation ${threadId} due to ${reason}`);
+      await sendEmailNotification(threadId, reason);
+      conversations.delete(threadId);
+      console.log(`Conversation ${threadId} ended and removed from memory`);
+    }
   }
 }
+
+// Set up interval to check conversations
+setInterval(checkConversations, CHECK_INTERVAL);
 
 // Function to send email
 async function sendEmailNotification(threadId, reason) {
