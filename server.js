@@ -1,11 +1,8 @@
 import express from 'express';
 import OpenAI from 'openai';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import nodemailer from 'nodemailer';
 import fetch from 'node-fetch';
-
-dotenv.config();
 
 const app = express();
 app.use(cors({
@@ -29,10 +26,10 @@ const transporter = nodemailer.createTransport({
 });
 
 // In-memory conversation storage (Note: this will reset on each deployment)
-const conversations = new Map();
+let conversations = new Map();
 
-// Timeout for conversations (12 seconds as requested)
-const CONVERSATION_TIMEOUT = 12 * 1000; // 10 seconds in milliseconds
+// Timeout for conversations (10 seconds as requested)
+const CONVERSATION_TIMEOUT = 10 * 1000; // 10 seconds in milliseconds
 
 // Function to get location from IP using freeipapi.com
 async function getLocationFromIP(ip) {
@@ -63,7 +60,6 @@ function logConversation(threadId, message, role, ip) {
   conversation.lastActivityTime = Date.now();
   
   console.log(`Logged message for thread ${threadId}: ${role}: ${message}`);
-  console.log(`Updated lastActivityTime for thread ${threadId}: ${new Date(conversation.lastActivityTime).toISOString()}`);
 }
 
 // Function to send email
@@ -238,4 +234,4 @@ app.get('/api/test-email', async (req, res) => {
   }
 });
 
-export default app;
+module.exports = app;
