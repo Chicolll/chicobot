@@ -37,8 +37,8 @@ const transporter = nodemailer.createTransport({
 // In-memory conversation storage
 const conversations = new Map();
 
-// Timeout for conversations (10 seconds for testing, adjust as needed)
-const CONVERSATION_TIMEOUT = 10 * 1000; // 10 seconds in milliseconds
+// Timeout for conversations (30 seconds for testing, adjust as needed)
+const CONVERSATION_TIMEOUT = 30 * 1000; // 30 seconds in milliseconds
 
 // Maximum session duration (90 minutes)
 const MAX_SESSION_DURATION = 90 * 60 * 1000; // 90 minutes in milliseconds
@@ -60,31 +60,15 @@ function logConversation(threadId, message, role, ip) {
   if (!conversations.has(threadId)) {
     conversations.set(threadId, {
       messages: [],
-      startTime: new Date().toLocaleString("en-US", {timeZone: "America/Los_Angeles"}),
+      startTime: Date.now(),
       lastActivityTime: Date.now(),
       ip: ip,
-      timeoutId: null,
-      maxSessionTimeoutId: null
     });
-    
-    // Set the max session timeout
-    const maxSessionTimeoutId = setTimeout(() => {
-      sendEmailNotification(threadId, 'Max session duration reached');
-    }, MAX_SESSION_DURATION);
-    
-    conversations.get(threadId).maxSessionTimeoutId = maxSessionTimeoutId;
-  } else {
-    clearTimeout(conversations.get(threadId).timeoutId);
   }
   
   const conversation = conversations.get(threadId);
   conversation.messages.push({ role, content: message });
   conversation.lastActivityTime = Date.now();
-  
-  // Set a new timeout for inactivity
-  conversation.timeoutId = setTimeout(() => {
-    sendEmailNotification(threadId, 'Inactivity timeout');
-  }, CONVERSATION_TIMEOUT);
   
   console.log(`Logged message for thread ${threadId}: ${role}: ${message}`);
 }
@@ -98,13 +82,14 @@ async function sendEmailNotification(threadId, reason) {
   }
 
   const location = await getLocationFromIP(conversation.ip);
+  const startTime = new Date(conversation.startTime).toLocaleString("en-US", {timeZone: "America/Los_Angeles"});
   const endTime = new Date().toLocaleString("en-US", {timeZone: "America/Los_Angeles"});
-  const duration = (new Date(endTime) - new Date(conversation.startTime)) / 1000; // duration in seconds
+  const duration = (Date.now() - conversation.startTime) / 1000; // duration in seconds
 
   const emailContent = `
 IP Address: ${conversation.ip}
 Location: ${location}
-Start Time: ${conversation.startTime} (California Time)
+Start Time: ${startTime} (California Time)
 End Time: ${endTime} (California Time)
 Duration: ${Math.floor(duration / 60)} minutes ${Math.floor(duration % 60)} seconds
 Reason for ending: ${reason}
@@ -124,21 +109,28 @@ ${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
     await transporter.sendMail(mailOptions);
     console.log(`Email sent for thread ${threadId}`);
     // Clear the conversation after sending email
-    clearConversation(threadId);
+    conversations.delete(threadId);
   } catch (error) {
     console.error('Error sending email:', error);
   }
 }
 
-// Function to clear conversation and its associated timeouts
-function clearConversation(threadId) {
-  const conversation = conversations.get(threadId);
-  if (conversation) {
-    clearTimeout(conversation.timeoutId);
-    clearTimeout(conversation.maxSessionTimeoutId);
-    conversations.delete(threadId);
-  }
+// Function to check and end inactive conversations
+function checkInactiveConversations() {
+  const now = Date.now();
+  conversations.forEach((conversation, threadId) => {
+    const inactiveDuration = now - conversation.lastActivityTime;
+    const totalDuration = now - conversation.startTime;
+    
+    if (inactiveDuration >= CONVERSATION_TIMEOUT || totalDuration >= MAX_SESSION_DURATION) {
+      const reason = inactiveDuration >= CONVERSATION_TIMEOUT ? 'Inactivity timeout' : 'Max session duration reached';
+      sendEmailNotification(threadId, reason);
+    }
+  });
 }
+
+// Set interval to check inactive conversations every 10 seconds
+setInterval(checkInactiveConversations, 10000);
 
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
