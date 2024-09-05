@@ -210,8 +210,8 @@ app.post('/api/reset', async (req, res) => {
 
 // New endpoint for GitHub Action
 app.post('/api/check-and-send-emails', async (req, res) => {
-  const secretToken = req.headers['x-github-token'];
-  if (secretToken !== process.env.GITHUB_SECRET_TOKEN) {
+  const secretToken = req.headers['x-git-token'];
+  if (secretToken !== process.env.GIT_SECRET_TOKEN) {
     return res.status(403).send('Unauthorized');
   }
 
