@@ -43,6 +43,25 @@ async function getLocationFromIP(ip) {
   }
 }
 
+// Function to log conversations
+function logConversation(threadId, message, role, ip) {
+  console.log(`Logging conversation for thread ${threadId}`);
+  if (!conversations.has(threadId)) {
+    conversations.set(threadId, {
+      messages: [],
+      startTime: Date.now(),
+      lastActivityTime: Date.now(),
+      ip: ip
+    });
+  }
+  
+  const conversation = conversations.get(threadId);
+  conversation.messages.push({ role, content: message });
+  conversation.lastActivityTime = Date.now();
+  
+  console.log(`Logged message for thread ${threadId}: ${role}: ${message}`);
+}
+
 // Function to send email
 async function sendEmailNotification(threadId, reason) {
   console.log(`Preparing to send email for thread ${threadId}`);
@@ -89,9 +108,105 @@ ${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
   });
 }
 
-// Existing routes and functions...
+// Root route
+app.get('/', (req, res) => {
+  res.send('Chico Bot Server is running');
+});
 
-// New route to handle the page close signal
+// Chat route
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { message, threadId } = req.body;
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+
+    let thread;
+    if (threadId) {
+      thread = await openai.beta.threads.retrieve(threadId);
+      console.log("Retrieved existing thread:", thread.id);
+    } else {
+      thread = await openai.beta.threads.create();
+      console.log("Created new thread:", thread.id);
+    }
+
+    // Log user message
+    logConversation(thread.id, message, 'user', ip);
+
+    await openai.beta.threads.messages.create(thread.id, {
+      role: "user",
+      content: message
+    });
+
+    const run = await openai.beta.threads.runs.create(thread.id, {
+      assistant_id: assistantId
+    });
+
+    // Set up SSE
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive'
+    });
+
+    // Function to send SSE
+    const sendSSE = (event, data) => {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // Start event
+    sendSSE('start', { message: 'Starting chat' });
+
+    // Check run status and stream response
+    while (true) {
+      const runStatus = await openai.beta.threads.runs.retrieve(thread.id, run.id);
+      if (runStatus.status === 'completed') {
+        const messages = await openai.beta.threads.messages.list(thread.id);
+        const lastMessage = messages.data[0];
+        if (lastMessage.role === 'assistant') {
+          sendSSE('message', { content: lastMessage.content[0].text.value });
+          logConversation(thread.id, lastMessage.content[0].text.value, 'assistant', ip);
+        }
+        break;
+      } else if (runStatus.status === 'failed') {
+        sendSSE('error', { message: 'Run failed' });
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    // End event
+    sendSSE('end', { threadId: thread.id });
+    res.end();
+
+  } catch (error) {
+    console.error('Error in chat:', error);
+    res.status(500).json({ error: 'An error occurred while processing your request.' });
+  }
+});
+
+// Reset route
+app.post('/api/reset', async (req, res) => {
+  try {
+    const { threadId } = req.body;
+    if (threadId) {
+      await openai.beta.threads.del(threadId);
+      console.log("Deleted thread:", threadId);
+      
+      // Send final email notification before resetting
+      await sendEmailNotification(threadId, 'Manual reset');
+      // Clear the conversation from memory
+      conversations.delete(threadId);
+    }
+    const newThread = await openai.beta.threads.create();
+    console.log("Created new thread:", newThread.id);
+    res.json({ message: 'Chat reset successfully', threadId: newThread.id });
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: 'An error occurred while resetting the chat.' });
+  }
+});
+
+// Signal close route
 app.post('/api/signal-close', async (req, res) => {
   const { threadId } = req.body;
   console.log(`Received close signal for thread ${threadId}`);
@@ -109,16 +224,6 @@ app.post('/api/signal-close', async (req, res) => {
   } else {
     res.status(400).send('ThreadId is required');
   }
-});
-
-// Existing chat route
-app.post('/api/chat', async (req, res) => {
-  // ... (existing chat logic)
-});
-
-// Existing reset route
-app.post('/api/reset', async (req, res) => {
-  // ... (existing reset logic)
 });
 
 // Ping route to keep the connection alive
