@@ -37,14 +37,14 @@ const transporter = nodemailer.createTransport({
 // In-memory conversation storage
 const conversations = new Map();
 
-// Timeout for conversations (2 minutes for testing, adjust as needed)
-const CONVERSATION_TIMEOUT = 2 * 60 * 1000; // 2 minutes in milliseconds
+// Timeout for conversations (10 seconds as requested)
+const CONVERSATION_TIMEOUT = 10 * 1000; // 10 seconds in milliseconds
 
 // Maximum session duration (90 minutes)
 const MAX_SESSION_DURATION = 90 * 60 * 1000; // 90 minutes in milliseconds
 
-// Interval for checking conversations (every 30 seconds)
-const CHECK_INTERVAL = 30 * 1000; // 30 seconds in milliseconds
+// Interval for checking conversations (every 5 seconds)
+const CHECK_INTERVAL = 5 * 1000; // 5 seconds in milliseconds
 
 // Function to get location from IP using freeipapi.com
 async function getLocationFromIP(ip) {
@@ -91,9 +91,13 @@ async function checkConversations() {
     if (inactiveDuration >= CONVERSATION_TIMEOUT || totalDuration >= MAX_SESSION_DURATION) {
       const reason = inactiveDuration >= CONVERSATION_TIMEOUT ? 'Inactivity timeout' : 'Max session duration reached';
       console.log(`Ending conversation ${threadId} due to ${reason}`);
-      await sendEmailNotification(threadId, reason);
-      conversations.delete(threadId);
-      console.log(`Conversation ${threadId} ended and removed from memory`);
+      try {
+        await sendEmailNotification(threadId, reason);
+        conversations.delete(threadId);
+        console.log(`Conversation ${threadId} ended and removed from memory`);
+      } catch (error) {
+        console.error(`Error ending conversation ${threadId}:`, error);
+      }
     }
   }
 }
@@ -134,12 +138,17 @@ ${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
     text: emailContent
   };
 
-  try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Email sent for thread ${threadId}`);
-  } catch (error) {
-    console.error(`Error sending email for thread ${threadId}:`, error);
-  }
+  return new Promise((resolve, reject) => {
+    transporter.sendMail(mailOptions, (error, info) => {
+      if (error) {
+        console.error(`Error sending email for thread ${threadId}:`, error);
+        reject(error);
+      } else {
+        console.log(`Email sent for thread ${threadId}: ${info.response}`);
+        resolve(info);
+      }
+    });
+  });
 }
 
 app.get('/', (req, res) => {
@@ -278,6 +287,17 @@ app.post('/api/end-conversation', async (req, res) => {
   } catch (error) {
     console.error('Error ending conversation:', error);
     res.status(500).json({ error: 'An error occurred while ending the conversation.' });
+  }
+});
+
+// Test route for email sending
+app.get('/test-email', async (req, res) => {
+  try {
+    await sendEmailNotification('test_thread', 'Test email');
+    res.send('Test email sent successfully');
+  } catch (error) {
+    console.error('Error sending test email:', error);
+    res.status(500).send('Error sending test email');
   }
 });
 
