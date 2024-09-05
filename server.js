@@ -104,7 +104,13 @@ async function checkConversations() {
 }
 
 // Set up interval to check conversations
-setInterval(checkConversations, CHECK_INTERVAL);
+const checkInterval = setInterval(checkConversations, CHECK_INTERVAL);
+
+// Ensure the interval is cleared when the server shuts down
+process.on('SIGTERM', () => {
+  clearInterval(checkInterval);
+  console.log('Cleared check interval on SIGTERM');
+});
 
 // Function to send email
 async function sendEmailNotification(threadId, reason) {
@@ -302,7 +308,20 @@ app.get('/test-email', async (req, res) => {
   }
 });
 
+// Keep-alive route
+app.get('/api/ping', (req, res) => {
+  res.status(200).send('pong');
+});
+
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+const server = app.listen(port, () => console.log(`Server running on port ${port}`));
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  server.close(() => {
+    console.log('HTTP server closed');
+  });
+});
 
 export default app;
