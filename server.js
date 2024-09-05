@@ -6,7 +6,7 @@ import fetch from 'node-fetch';
 
 const app = express();
 app.use(cors({
-  origin: ['https://www.chicoliu.com', 'https://www.chicoliu.webflow.io']
+  origin: ['https://www.chicoliu.com', 'https://www.chicoliu.webflow.io', 'http://localhost:3000']
 }));
 app.use(express.json());
 
@@ -27,9 +27,6 @@ const transporter = nodemailer.createTransport({
 
 // In-memory conversation storage
 let conversations = new Map();
-
-// Timeout for conversations (10 seconds as requested)
-const CONVERSATION_TIMEOUT = 10 * 1000; // 10 seconds in milliseconds
 
 // Function to get location from IP using freeipapi.com
 async function getLocationFromIP(ip) {
@@ -149,8 +146,7 @@ app.post('/api/chat', async (req, res) => {
 
     // Function to send SSE
     const sendSSE = (event, data) => {
-      res.write(`event: ${event}\n`);
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: event, ...data })}\n\n`);
     };
 
     // Start event
@@ -163,8 +159,14 @@ app.post('/api/chat', async (req, res) => {
         const messages = await openai.beta.threads.messages.list(thread.id);
         const lastMessage = messages.data[0];
         if (lastMessage.role === 'assistant') {
-          sendSSE('message', { content: lastMessage.content[0].text.value });
-          logConversation(thread.id, lastMessage.content[0].text.value, 'assistant', ip);
+          const content = lastMessage.content[0].text.value;
+          // Stream the content word by word
+          const words = content.split(' ');
+          for (let word of words) {
+            sendSSE('delta', { content: word + ' ' });
+            await new Promise(resolve => setTimeout(resolve, 50)); // Small delay between words
+          }
+          logConversation(thread.id, content, 'assistant', ip);
         }
         break;
       } else if (runStatus.status === 'failed') {
@@ -206,35 +208,37 @@ app.post('/api/reset', async (req, res) => {
   }
 });
 
-// Signal close route
-app.post('/api/signal-close', async (req, res) => {
-  const { threadId } = req.body;
-  console.log(`Received close signal for thread ${threadId}`);
-  
-  if (threadId) {
-    try {
-      await sendEmailNotification(threadId, 'Page closed');
-      conversations.delete(threadId);
-      console.log(`Processed close signal for thread ${threadId}`);
-      res.status(200).send('Close signal received and processed');
-    } catch (error) {
-      console.error(`Error processing close signal for thread ${threadId}:`, error);
-      res.status(500).send('Error processing close signal');
-    }
-  } else {
-    res.status(400).send('ThreadId is required');
+// New endpoint for GitHub Action
+app.post('/api/check-and-send-emails', async (req, res) => {
+  const secretToken = req.headers['x-github-token'];
+  if (secretToken !== process.env.GITHUB_SECRET_TOKEN) {
+    return res.status(403).send('Unauthorized');
   }
-});
 
-// Ping route to keep the connection alive
-app.post('/api/ping', (req, res) => {
-  const { threadId } = req.body;
-  if (threadId && conversations.has(threadId)) {
-    conversations.get(threadId).lastActivityTime = Date.now();
-    res.status(200).send('Ping received');
-  } else {
-    res.status(404).send('Thread not found');
+  console.log('Checking all conversations');
+  const now = Date.now();
+  const inactiveThreads = [];
+
+  for (const [threadId, conversation] of conversations.entries()) {
+    const inactiveDuration = now - conversation.lastActivityTime;
+    console.log(`Thread ${threadId} - Inactive duration: ${inactiveDuration}ms`);
+
+    if (inactiveDuration >= 10 * 60 * 1000) { // 10 minutes inactivity
+      inactiveThreads.push(threadId);
+    }
   }
+
+  for (const threadId of inactiveThreads) {
+    try {
+      await sendEmailNotification(threadId, 'Inactivity timeout');
+      conversations.delete(threadId);
+      console.log(`Processed inactive thread ${threadId}`);
+    } catch (error) {
+      console.error(`Error processing inactive thread ${threadId}:`, error);
+    }
+  }
+
+  res.status(200).send(`Processed ${inactiveThreads.length} inactive threads`);
 });
 
 const port = process.env.PORT || 3000;
