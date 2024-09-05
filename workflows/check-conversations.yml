@@ -2,7 +2,7 @@ name: Check Conversations
 
 on:
   schedule:
-    - cron: '*/1 * * * *'  # Runs every 10 minutes
+    - cron: '*/10 * * * *'  # Runs every 10 minutes
 
 jobs:
   check-conversations:
@@ -12,5 +12,5 @@ jobs:
       run: |
         curl -X POST \
           -H "Content-Type: application/json" \
-          -H "x-github-token: ${{ secrets.GITHUB_SECRET_TOKEN }}" \
+          -H "x-git-token: ${{ secrets.GIT_SECRET_TOKEN }}" \
           https://chicobot-eta.vercel.app/api/check-and-send-emails
