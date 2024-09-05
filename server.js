@@ -37,8 +37,8 @@ const transporter = nodemailer.createTransport({
 // In-memory conversation storage
 const conversations = new Map();
 
-// Timeout for conversations (30 seconds for testing, adjust as needed)
-const CONVERSATION_TIMEOUT = 30 * 1000; // 30 seconds in milliseconds
+// Timeout for conversations (2 minutes for testing, adjust as needed)
+const CONVERSATION_TIMEOUT = 2 * 60 * 1000; // 2 minutes in milliseconds
 
 // Maximum session duration (90 minutes)
 const MAX_SESSION_DURATION = 90 * 60 * 1000; // 90 minutes in milliseconds
@@ -63,7 +63,12 @@ function logConversation(threadId, message, role, ip) {
       startTime: Date.now(),
       lastActivityTime: Date.now(),
       ip: ip,
+      timeoutId: setTimeout(() => checkAndEndConversation(threadId), CONVERSATION_TIMEOUT)
     });
+  } else {
+    const conversation = conversations.get(threadId);
+    clearTimeout(conversation.timeoutId);
+    conversation.timeoutId = setTimeout(() => checkAndEndConversation(threadId), CONVERSATION_TIMEOUT);
   }
   
   const conversation = conversations.get(threadId);
@@ -71,6 +76,22 @@ function logConversation(threadId, message, role, ip) {
   conversation.lastActivityTime = Date.now();
   
   console.log(`Logged message for thread ${threadId}: ${role}: ${message}`);
+}
+
+// Function to check and end conversation if necessary
+async function checkAndEndConversation(threadId) {
+  const conversation = conversations.get(threadId);
+  if (!conversation) return;
+
+  const now = Date.now();
+  const inactiveDuration = now - conversation.lastActivityTime;
+  const totalDuration = now - conversation.startTime;
+
+  if (inactiveDuration >= CONVERSATION_TIMEOUT || totalDuration >= MAX_SESSION_DURATION) {
+    const reason = inactiveDuration >= CONVERSATION_TIMEOUT ? 'Inactivity timeout' : 'Max session duration reached';
+    await sendEmailNotification(threadId, reason);
+    conversations.delete(threadId);
+  }
 }
 
 // Function to send email
@@ -108,29 +129,10 @@ ${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
   try {
     await transporter.sendMail(mailOptions);
     console.log(`Email sent for thread ${threadId}`);
-    // Clear the conversation after sending email
-    conversations.delete(threadId);
   } catch (error) {
     console.error('Error sending email:', error);
   }
 }
-
-// Function to check and end inactive conversations
-function checkInactiveConversations() {
-  const now = Date.now();
-  conversations.forEach((conversation, threadId) => {
-    const inactiveDuration = now - conversation.lastActivityTime;
-    const totalDuration = now - conversation.startTime;
-    
-    if (inactiveDuration >= CONVERSATION_TIMEOUT || totalDuration >= MAX_SESSION_DURATION) {
-      const reason = inactiveDuration >= CONVERSATION_TIMEOUT ? 'Inactivity timeout' : 'Max session duration reached';
-      sendEmailNotification(threadId, reason);
-    }
-  });
-}
-
-// Set interval to check inactive conversations every 10 seconds
-setInterval(checkInactiveConversations, 10000);
 
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -242,6 +244,8 @@ app.post('/api/reset', async (req, res) => {
       
       // Send final email notification before resetting
       await sendEmailNotification(threadId, 'Manual reset');
+      // Clear the conversation from memory
+      conversations.delete(threadId);
     }
     const newThread = await openai.beta.threads.create();
     console.log("Created new thread:", newThread.id);
@@ -257,6 +261,8 @@ app.post('/api/end-conversation', async (req, res) => {
     const { threadId } = req.body;
     if (threadId) {
       await sendEmailNotification(threadId, 'Manual end');
+      // Clear the conversation from memory
+      conversations.delete(threadId);
       res.json({ message: 'Conversation ended and email sent successfully' });
     } else {
       res.status(400).json({ error: 'ThreadId is required' });
