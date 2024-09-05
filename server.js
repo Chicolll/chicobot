@@ -34,11 +34,14 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// In-memory conversation storage (Note: this will reset on each deployment)
+// In-memory conversation storage
 const conversations = new Map();
 
-// Timeout for conversations (5 minutes)
-const CONVERSATION_TIMEOUT = 5 * 60 * 1000; // 5 minutes in milliseconds
+// Timeout for conversations (10 seconds for testing, adjust as needed)
+const CONVERSATION_TIMEOUT = 10 * 1000; // 10 seconds in milliseconds
+
+// Maximum session duration (90 minutes)
+const MAX_SESSION_DURATION = 90 * 60 * 1000; // 90 minutes in milliseconds
 
 // Function to get location from IP using freeipapi.com
 async function getLocationFromIP(ip) {
@@ -52,24 +55,42 @@ async function getLocationFromIP(ip) {
   }
 }
 
-// Function to log conversations (in-memory only for Vercel)
+// Function to log conversations
 function logConversation(threadId, message, role, ip) {
   if (!conversations.has(threadId)) {
     conversations.set(threadId, {
       messages: [],
       startTime: new Date().toLocaleString("en-US", {timeZone: "America/Los_Angeles"}),
       lastActivityTime: Date.now(),
-      ip: ip
+      ip: ip,
+      timeoutId: null,
+      maxSessionTimeoutId: null
     });
+    
+    // Set the max session timeout
+    const maxSessionTimeoutId = setTimeout(() => {
+      sendEmailNotification(threadId, 'Max session duration reached');
+    }, MAX_SESSION_DURATION);
+    
+    conversations.get(threadId).maxSessionTimeoutId = maxSessionTimeoutId;
   } else {
-    conversations.get(threadId).lastActivityTime = Date.now();
+    clearTimeout(conversations.get(threadId).timeoutId);
   }
-  conversations.get(threadId).messages.push({ role, content: message });
+  
+  const conversation = conversations.get(threadId);
+  conversation.messages.push({ role, content: message });
+  conversation.lastActivityTime = Date.now();
+  
+  // Set a new timeout for inactivity
+  conversation.timeoutId = setTimeout(() => {
+    sendEmailNotification(threadId, 'Inactivity timeout');
+  }, CONVERSATION_TIMEOUT);
+  
   console.log(`Logged message for thread ${threadId}: ${role}: ${message}`);
 }
 
 // Function to send email
-async function sendEmailNotification(threadId) {
+async function sendEmailNotification(threadId, reason) {
   const conversation = conversations.get(threadId);
   if (!conversation || conversation.messages.length === 0) {
     console.log(`No conversation to send for thread ${threadId}`);
@@ -86,6 +107,7 @@ Location: ${location}
 Start Time: ${conversation.startTime} (California Time)
 End Time: ${endTime} (California Time)
 Duration: ${Math.floor(duration / 60)} minutes ${Math.floor(duration % 60)} seconds
+Reason for ending: ${reason}
 
 Conversation:
 ${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
@@ -94,7 +116,7 @@ ${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
   const mailOptions = {
     from: process.env.EMAIL_USER,
     to: process.env.NOTIFICATION_EMAIL,
-    subject: `Conversation from ${location}`,
+    subject: `Conversation from ${location} - ${reason}`,
     text: emailContent
   };
 
@@ -102,25 +124,21 @@ ${conversation.messages.map(msg => `${msg.role}: ${msg.content}`).join('\n\n')}
     await transporter.sendMail(mailOptions);
     console.log(`Email sent for thread ${threadId}`);
     // Clear the conversation after sending email
-    conversations.delete(threadId);
+    clearConversation(threadId);
   } catch (error) {
     console.error('Error sending email:', error);
   }
 }
 
-// Function to check for timed out conversations
-function checkConversationTimeouts() {
-  const now = Date.now();
-  for (const [threadId, conversation] of conversations.entries()) {
-    if (now - conversation.lastActivityTime > CONVERSATION_TIMEOUT) {
-      console.log(`Conversation ${threadId} timed out. Sending email notification.`);
-      sendEmailNotification(threadId);
-    }
+// Function to clear conversation and its associated timeouts
+function clearConversation(threadId) {
+  const conversation = conversations.get(threadId);
+  if (conversation) {
+    clearTimeout(conversation.timeoutId);
+    clearTimeout(conversation.maxSessionTimeoutId);
+    conversations.delete(threadId);
   }
 }
-
-// Set up interval to check for timed out conversations
-setInterval(checkConversationTimeouts, 60000); // Check every minute
 
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -231,7 +249,7 @@ app.post('/api/reset', async (req, res) => {
       console.log("Deleted thread:", threadId);
       
       // Send final email notification before resetting
-      await sendEmailNotification(threadId);
+      await sendEmailNotification(threadId, 'Manual reset');
     }
     const newThread = await openai.beta.threads.create();
     console.log("Created new thread:", newThread.id);
@@ -246,7 +264,7 @@ app.post('/api/end-conversation', async (req, res) => {
   try {
     const { threadId } = req.body;
     if (threadId) {
-      await sendEmailNotification(threadId);
+      await sendEmailNotification(threadId, 'Manual end');
       res.json({ message: 'Conversation ended and email sent successfully' });
     } else {
       res.status(400).json({ error: 'ThreadId is required' });
